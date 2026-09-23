@@ -1,0 +1,34 @@
+file,team,model,family,notes
+mipDuck_1980-2023_CoSMoS_COAST_conv_model_with_interannual_SV.csv,CoSMoS-COAST_SV,CoSMoS-COAST conv +IA,Hybrid,with interannual term
+mipDuck_1980-2023_CoSMoS_COAST_conv_model_without_interannual_SV.csv,CoSMoS-COAST_SV,CoSMoS-COAST conv,Hybrid,
+mipDuck_1980-2023_CoSMoS_COAST_dmd_model_with_interannual_SV.csv,CoSMoS-COAST_SV,CoSMoS-COAST DMD +IA,Hybrid,with interannual term
+mipDuck_1980-2023_CoSMoS_COAST_dmd_model_without_interannual_SV.csv,CoSMoS-COAST_SV,CoSMoS-COAST DMD,Hybrid,
+mipDuck_1980-2023_CSHORE.csv,ERDC-CHL,CSHORE,Process-based,cross-shore profile model
+mipDuck_1980-2023_HolzenthalDingGENCADE.csv,ERDC-CHL,GENCADE,One-line,longshore one-line model
+mipDuck_1980-2023_WaveBulkParameters_IdSOR.csv,IdSOR,IdSOR,Unclassified,check submission notes
+mipDuck_1980-2023_waves_simplified_ShoreFor_BruunSLR_ERDCCHL_SRD.csv,CEERD-CHL-Devoe,ShoreFor+Bruun (ERDC),Equilibrium,ShoreFor with Bruun sea-level term
+mipDuck_1980-2023_waves_simplified-COCollective.csv,COCollective,COCollective,Unclassified,see submission_description.md
+mipDuck_1980-2023_CWaCS.csv,CSIRO_nearshore,CWaCS,Unclassified,Combined Wave Convolution for Shoreline (see PDF)
+mipDuck_1980-2023_CWaCS_smoothed.csv,CSIRO_nearshore,CWaCS smoothed,Unclassified,Combined Wave Convolution for Shoreline (see PDF)
+mipDuck_1980-2023_ICM-TCN_transect.csv,ICM-TCN,ICM-TCN,Deep learning,temporal convolutional network
+mipDuck_1980-2023-DLinear.csv,IHCantabriaCMEG,DLinear,Deep learning,
+mipDuck_1980-2023-ETSformer.csv,IHCantabriaCMEG,ETSformer,Deep learning,
+mipDuck_1980-2023-FEDformer.csv,IHCantabriaCMEG,FEDformer,Deep learning,
+mipDuck_1980-2023-MillerDean.csv,IHCantabriaCMEG,Miller-Dean,Equilibrium,
+mipDuck_1980-2023-Nonstationary_Transformer.csv,IHCantabriaCMEG,NS-Transformer,Deep learning,
+mipDuck_1980-2023-PatchTST.csv,IHCantabriaCMEG,PatchTST,Deep learning,
+mipDuck_1980-2023-SPADS.csv,IHCantabriaCMEG,SPADS,Unclassified,check readme.md
+mipDuck_1980-2023-SPADS-Huber.csv,IHCantabriaCMEG,SPADS-Huber,Unclassified,check readme.md
+mipDuck_1980-2023-SPADS-Scale.csv,IHCantabriaCMEG,SPADS-Scale,Unclassified,check readme.md
+mipDuck_1980-2023-TimeMixer.csv,IHCantabriaCMEG,TimeMixer,Deep learning,
+mipDuck_1980-2023-TimeXer.csv,IHCantabriaCMEG,TimeXer,Deep learning,
+mipDuck_1980-2023-TimesNet.csv,IHCantabriaCMEG,TimesNet,Deep learning,
+mipDuck_1980-2023-Yates09.csv,IHCantabriaCMEG,Yates09,Equilibrium,
+mipDuck_1980-2023-iTransformer.csv,IHCantabriaCMEG,iTransformer,Deep learning,
+mipDuck_1980-2023-moirai.csv,IHCantabriaCMEG,Moirai,Deep learning,time-series foundation model
+mipDuck_1980-2023-timer_xl.csv,IHCantabriaCMEG,Timer-XL,Deep learning,time-series foundation model
+mipDuck_1980-2023-ttm.csv,IHCantabriaCMEG,TTM,Deep learning,time-series foundation model
+mipDuck_1980-2023_waves_bulk-LEGIShoreFor.csv,LEGI,ShoreFor (LEGI),Equilibrium,
+mipDuck_1980-2023_waves_bulk-LEGIShoreForeKFcp45.csv,LEGI,ShoreFor-eKF cp45,Equilibrium + DA,ShoreFor with ensemble Kalman filter
+mipDuck_1980-2023_waves_bulk-LEGIShoreForeKFcp55.csv,LEGI,ShoreFor-eKF cp55,Equilibrium + DA,ShoreFor with ensemble Kalman filter
+mipDuck_1980-2023_waves_simplified-MohammadTraboulsi.csv,mtraboulsi689,Traboulsi,Unclassified,check with the team

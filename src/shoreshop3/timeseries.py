@@ -37,7 +37,7 @@ class RegularSeries:
 
 def _as_float_time(times) -> tuple[np.ndarray, bool]:
     idx = pd.Index(times)
-    if idx.dtype == object:
+    if idx.dtype == object or pd.api.types.is_string_dtype(idx.dtype):  # pandas 3: "str" dtype
         try:
             idx = pd.DatetimeIndex(pd.to_datetime(idx))
         except (ValueError, TypeError):

@@ -34,8 +34,11 @@ scripts/
   globus_sync.sh            one-way mirror to data/raw (checksum-based, re-runnable)
   summarize_manifest.py     table of files and sizes per team from a listing
   local_inventory.py        per-team file inventory + peek inside CSV/NetCDF/MAT
+  duck_wavelets.py          Duck single-profile models vs FRF surveys (figures + tables)
+config/duck_models.csv      Duck submissions: team, model label, provisional family
 src/shoreshop3/
   wavelets.py               CWT, cross-wavelet, coherence, significance, per-band skill
+  duck.py                   read Duck submissions and FRF surveys onto one grid
   timeseries.py             irregular observations -> regular grid + gap flags
   inventory.py              inventory helpers used by the scripts
   plotting.py               wavelet power / coherence maps, spectra, skill heatmaps
@@ -84,6 +87,28 @@ pytest            # ~15 s; checks the wavelet code against known answers and pyc
    ```bash
    python scripts/local_inventory.py   # -> outputs/inventory/INVENTORY.md, teams.csv, files.csv
    ```
+
+## Duck single-profile hindcasts (first analysis)
+
+Needs `InputData/hindcast_1980_2023/shorelines_and_profiles/FRF_Profiles.zip` and
+the teams' `mipDuck_1980-2023*.csv` files in `data/raw/`.
+
+```bash
+python scripts/duck_wavelets.py             # ~1-10 min; figures + tables in outputs/duck_1980-2023/
+python scripts/duck_wavelets.py --profiles 1006 --end 2017-06-13 \
+    --out outputs/duck_1980-2023_1006_pre2017 --note "Profile 1006 before the June 2017 step"
+```
+
+* Surveys at FRF profiles yFRF = 1 and 1006 go on a weekly grid over the window
+  every model covers (1988-03 to 2019-11); gaps > 60 days are masked. Models are
+  read on the survey days and interpolated the same way (`--sampling surveys`),
+  so both carry the same sampling filter.
+* Model labels and provisional families: `config/duck_models.csv` (a new
+  submission without a row still runs, labelled by its file name).
+* `outputs/duck_1980-2023/README.md` lists the best models per band, family
+  medians, trends, data checks (outliers, steps, duplicate submissions) and caveats.
+* Coherence significance levels are cached in `data/interim/wtc_sig/`, so
+  re-runs take about a minute.
 
 ## Wavelet toolkit in 10 lines
 

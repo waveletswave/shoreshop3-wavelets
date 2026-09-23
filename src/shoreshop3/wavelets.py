@@ -56,6 +56,7 @@ __all__ = [
     "power_significance",
     "global_spectrum",
     "global_significance",
+    "paired_global_spectra",
     "cross_wavelet",
     "xwt_significance",
     "wavelet_coherence",
@@ -536,22 +537,24 @@ def coherence_significance(n: int, dt: float, alpha_x: float, alpha_y: float, *,
                            pad: str | None = "tc", level: float = 0.95,
                            n_surrogates: int = 300, length_factor: int = 2, seed: int = 0,
                            cache_dir: str | Path | None = None,
-                           scale_kernel: np.ndarray | None = None) -> np.ndarray:
+                           scale_kernel: np.ndarray | None = None,
+                           alpha_decimals: int = 3) -> np.ndarray:
     """Monte Carlo significance level of R^2 per scale against AR1 noise.
 
     Follows Grinsted's wtcsignif.m: pairs of red-noise series with the given
-    AR1 coefficients (rounded to 3 decimals, max 0.999) are transformed with the same
+    AR1 coefficients (rounded to ``alpha_decimals``, max 0.999) are transformed with the same
     scales, and the ``level`` quantile of R^2 outside the COI is taken per scale.
     Surrogates are ``length_factor`` times longer than the data to sample long
     periods better. Results are cached in memory and optionally on disk.
     Use the same ``scale_kernel`` as in :func:`wavelet_coherence` (default:
-    Grinsted's 0.6-octave boxcar).
+    Grinsted's 0.6-octave boxcar). Rounding the AR1 coefficients to 2 decimals
+    lets many series share one Monte Carlo run.
 
     Returns an array (n_scales,) aligned with ``make_scales(n, dt, dj, s0, J)``.
     """
     scales = make_scales(n, dt, dj, s0, J)
     s0_, J_ = scales[0], scales.size - 1
-    ax, ay = (min(max(round(float(a), 3), 0.0), 0.999) for a in (alpha_x, alpha_y))
+    ax, ay = (min(max(round(float(a), int(alpha_decimals)), 0.0), 0.999) for a in (alpha_x, alpha_y))
     kern = None if scale_kernel is None else [round(float(v), 10) for v in scale_kernel]
     key_dict = dict(n=int(n), dt=float(dt), dj=float(dj), s0=float(s0_), J=int(J_), pad=pad,
                     level=float(level), n_surrogates=int(n_surrogates),
@@ -597,6 +600,27 @@ def coherence_significance(n: int, dt: float, alpha_x: float, alpha_y: float, *,
         path.parent.mkdir(parents=True, exist_ok=True)
         np.save(path, sig)
     return sig.copy()
+
+
+def paired_global_spectra(obs: CWTResult, model: CWTResult) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Time-averaged power of obs and model over the cells valid for both.
+
+    Returns (periods, obs_power, model_power) in the squared units of the
+    series (e.g. m^2); NaN where a scale has no valid cell. The ratio
+    model/obs tells at which periods a model is too damped (< 1) or too
+    active (> 1), using exactly the same times for both.
+    """
+    if obs.coeffs.shape != model.coeffs.shape:
+        raise ValueError("both transforms must share scales and length")
+    mask = obs.valid_mask() & model.valid_mask()
+    count = mask.sum(axis=1)
+
+    def _mean(res: CWTResult) -> np.ndarray:
+        p = res.power * (res.variance if res.standardized else 1.0)
+        tot = np.where(mask, p, 0.0).sum(axis=1)
+        return np.divide(tot, count, out=np.full(tot.shape, np.nan), where=count > 0)
+
+    return obs.periods, _mean(obs), _mean(model)
 
 
 # --- Scale-dependent skill ------------------------------------------------------------
@@ -717,7 +741,8 @@ def compare_models(obs, models: Mapping[str, Sequence[float]], dt: float,
                    detrend: bool = False, invalid_obs=None,
                    invalid_models: Mapping[str, Sequence[bool]] | None = None,
                    n_surrogates: int = 0, cache_dir: str | Path | None = None,
-                   seed: int = 0, phase_min_rsq: float = 0.5) -> pd.DataFrame:
+                   seed: int = 0, phase_min_rsq: float = 0.5,
+                   alpha_decimals: int = 3) -> pd.DataFrame:
     """Run :func:`band_skill` for several models against the same observations.
 
     Returns a tidy table with one row per (model, band). Set ``n_surrogates``
@@ -741,7 +766,7 @@ def compare_models(obs, models: Mapping[str, Sequence[float]], dt: float,
             sig = coherence_significance(obs.size, dt, a_obs, a_mod, dj=dj, s0=wo.scales[0],
                                          J=wo.scales.size - 1, pad=pad,
                                          n_surrogates=n_surrogates, seed=seed,
-                                         cache_dir=cache_dir)
+                                         cache_dir=cache_dir, alpha_decimals=alpha_decimals)
         df = pd.DataFrame([_band_metrics(wo, wm, coh, k, tuple(v), sig, phase_min_rsq)
                            for k, v in bands.items()])
         df.insert(0, "model", name)

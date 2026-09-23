@@ -44,9 +44,17 @@ Alongshore bands (placeholder): < 0.5 km (local), 0.5 - 5 km, > 5 km (embayment 
 * `phase_deg`, `lag`: timing error; positive = model lags observations
 * `var_frac_obs`: how much of the observed variance the band carries (weights the importance of a band)
 
+## Status
+
+* 2026-09: first pass for the Duck single-profile hindcasts (profiles 1 and 1006,
+  33 submissions from 10 teams, 1988-2019): `scripts/duck_wavelets.py`, results in
+  `outputs/duck_1980-2023/`. Bands used there: 1.5-4 months, 4-8 months, 8-18
+  months, 1.5-4 years, 4-8 years (the surveys every ~2-6 weeks do not resolve
+  shorter periods), plus the linear trend.
+
 ## Open questions
 
-1. Evaluation data: are the observations for the prediction period in `InputData/`, or held back by the organisers (blind test)?
+1. Evaluation data: the FRF surveys in `InputData/` end on 2019-12-06 (and the CoastSat file is labelled "Pre-2020"), so 2020-2023 looks like the blind test period. Everything up to 2019 is in-sample for the teams. Confirm with the organisers.
 2. Which target variables: shoreline position only, or also dune, berm, barrier width / overwash?
 3. Do all teams provide the same transects, time span and time step? Ensembles or multiple runs per team?
 4. Observation sampling (surveys vs satellite): sets the shortest resolvable period.

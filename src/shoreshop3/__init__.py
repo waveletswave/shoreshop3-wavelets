@@ -1,6 +1,6 @@
 """ShoreShop3 data organisation and wavelet analysis tools."""
 
-from . import inventory, paths, timeseries, wavelets
+from . import duck, inventory, paths, timeseries, wavelets
 from .timeseries import RegularSeries, regularize
 from .wavelets import (
     ar1,
@@ -15,9 +15,10 @@ from .wavelets import (
     wavelet_coherence,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
+    "duck",
     "inventory",
     "paths",
     "timeseries",

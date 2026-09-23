@@ -56,6 +56,61 @@ def test_skill_heatmap_metrics(tmp_path):
 def test_negative_zero_is_not_printed():
     assert sp._fmt_value(-0.001, "{:.2f}") == "0.00"
     assert sp._fmt_value(-0.2, "{:.2f}") == "-0.20"
+    assert sp._fmt_value(-12.3, lambda v: f"{v:.0f}") == "-12"
+
+
+def test_heatmap_band_labels_and_callable_format():
+    df = pd.DataFrame({"model": ["A", "A"], "band": ["x", "y"], "nse": [-15.2, 0.5]})
+    fig, ax = plt.subplots()
+    sp.plot_skill_heatmap(df, "nse", ax=ax, band_labels=["X\n50 % usable", "Y\n10 % usable"],
+                          fmt=lambda v: f"{v:.0f}" if abs(v) >= 10 else f"{v:.2f}")
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["X\n50 % usable", "Y\n10 % usable"]
+    assert {"-15", "0.50"} <= {t.get_text() for t in ax.texts}
+    with pytest.raises(ValueError, match="one label per band"):
+        sp.plot_skill_heatmap(df, "nse", ax=ax, band_labels=["only one"])
+
+
+def test_power_in_physical_units_shares_one_scale(tmp_path):
+    n = 512
+    rng = np.random.default_rng(2)
+    big = 10 * np.sin(np.arange(n) / 6) + rng.standard_normal(n)
+    small = 0.1 * big
+    wb, ws = wv.cwt(big, 1.0), wv.cwt(small, 1.0)
+    levels = sp.power_levels([wb])
+    assert np.allclose(np.diff(levels), 0.5)
+    fig, axes = plt.subplots(1, 2)
+    cf_b = sp.plot_power(wb, ax=axes[0], physical=True, levels=levels, colorbar=False)
+    cf_s = sp.plot_power(ws, ax=axes[1], physical=True, levels=levels)  # colour bar in m², 2**k labels
+    assert np.allclose(cf_b.levels, cf_s.levels)
+    # same shape, 100x less power: log2 power shifted by log2(100) everywhere
+    lp = lambda r: np.log2(r.normalized_power() * r.variance)  # noqa: E731
+    assert np.allclose(lp(wb) - lp(ws), np.log2(100.0))
+    labels = [t.get_text() for t in fig.axes[-1].get_xticklabels() + fig.axes[-1].get_yticklabels()]
+    assert any(lab in {"1", "4", "16", "64", "256"} for lab in labels)
+    fig.savefig(tmp_path / "physical.png")
+
+
+def test_spectral_ratio_and_global_power_panels(tmp_path):
+    sp.use_style()
+    n = 600
+    rng = np.random.default_rng(1)
+    obs = np.sin(np.arange(n) / 8) + 0.5 * rng.standard_normal(n)
+    gap = np.zeros(n, bool)
+    gap[200:240] = True
+    wo = wv.cwt(obs, 1.0, invalid=gap)
+    wm = wv.cwt(0.5 * np.sin(np.arange(n) / 8), 1.0)
+    per, po, pm = wv.paired_global_spectra(wo, wm)
+    ratios = pd.DataFrame([pm / po, 2 * pm / po], index=["m1", "m2"])
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    sp.plot_spectral_ratio(per, ratios, ax=axes[0], unresolved_below=8.0, row_colors={"m1": sp.CATEGORICAL[0]})
+    assert any("not resolved" in t.get_text() for t in axes[0].texts)
+    bands = {"short": (8.0, 32.0), "long": (32.0, 128.0)}
+    sp.plot_global_power(wo, ax=axes[1], alpha=wv.ar1(obs), bands=bands)
+    shares = [t.get_text() for t in axes[1].texts]
+    assert len(shares) == 2 and all(s.endswith("%") for s in shares)
+    assert axes[1].yaxis_inverted()  # long periods at the bottom, like the power map
+    fig.savefig(tmp_path / "panels.png")
+    assert (tmp_path / "panels.png").stat().st_size > 5_000
 
 
 def test_model_colors_limit():

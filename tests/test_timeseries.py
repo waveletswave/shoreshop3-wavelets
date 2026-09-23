@@ -49,3 +49,11 @@ def test_timezone_aware_input():
     t = pd.date_range("2021-01-01", periods=4, freq="2D", tz="America/New_York")
     reg = regularize(t, [1, 2, 3, 4], "1D")
     assert len(reg.values) == 7
+
+
+def test_string_times_and_limits():
+    reg = regularize(["2020-01-01", "2020-01-15", "2020-02-01"], [1.0, 2.0, 3.0], "7D",
+                     start="2020-01-01", end="2020-01-29")
+    assert np.issubdtype(reg.time.dtype, np.datetime64)
+    assert reg.time[0] == np.datetime64("2020-01-01") and len(reg.time) == 5
+    assert reg.values[2] == pytest.approx(2.0)  # 2020-01-15
