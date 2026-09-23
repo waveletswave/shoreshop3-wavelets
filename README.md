@@ -1,0 +1,139 @@
+# ShoreShop3 wavelet analysis
+
+Organise the ShoreShop3 model submissions and use wavelets to find out **which
+models capture which processes, at which time and space scales**: storm
+response, seasonal cycles, interannual variability, long-term trends and
+alongshore patterns.
+
+The plan and open questions are in [`docs/analysis_plan.md`](docs/analysis_plan.md).
+
+## Data source
+
+ShoreShop3 Globus guest collection *"Guest collection of /rt.attic.346.shoreshop3"*
+(collection ID `5d24db1e-b934-4e35-9085-513be554aaa7`):
+
+| Folder | Contents |
+|---|---|
+| `InputData/` | forcing and observations provided to modellers |
+| `SubmissionTemplates/` | required submission format |
+| `UserSubmissions/<TEAM>/` | one folder per model team (ANTOLINEZ, BRIE, CCOST, CEERD-CHL-..., ...) |
+| `PublicSubmissions/` | public submissions |
+
+> **Treat the collection as read-only.** Your Globus account may be able to
+> create, rename or delete files there; do not. All work happens on the local
+> copy in `data/raw/`. The other teams' submissions may not be public yet, so
+> `data/` is excluded from git; keep the GitHub repository **private** until the
+> organisers say otherwise.
+
+## Layout
+
+```
+config/globus.env.example   collection ID, folders, destination (copy to globus.env)
+scripts/
+  globus_manifest.sh        list the collection + sizes per team (no download)
+  globus_sync.sh            one-way mirror to data/raw (checksum-based, re-runnable)
+  summarize_manifest.py     table of files and sizes per team from a listing
+  local_inventory.py        per-team file inventory + peek inside CSV/NetCDF/MAT
+src/shoreshop3/
+  wavelets.py               CWT, cross-wavelet, coherence, significance, per-band skill
+  timeseries.py             irregular observations -> regular grid + gap flags
+  inventory.py              inventory helpers used by the scripts
+  plotting.py               wavelet power / coherence maps, spectra, skill heatmaps
+  paths.py                  project paths (override with SHORESHOP3_DATA)
+notebooks/01_wavelet_demo.ipynb   the full method on synthetic data
+tests/                      pytest suite (synthetic signals with known answers)
+data/                       raw/ interim/ processed/ manifests/  (git-ignored)
+outputs/                    figures and tables (git-ignored)
+```
+
+## Setup
+
+```bash
+# conda / mamba
+conda env create -f environment.yml
+conda activate shoreshop3
+pip install -e .
+
+# or plain venv
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,globus,crosscheck]"
+
+pytest            # ~15 s; checks the wavelet code against known answers and pycwt
+```
+
+## Get the data
+
+1. `globus login` (opens a browser; use your Duke login).
+2. Install and start [Globus Connect Personal](https://www.globus.org/globus-connect-personal)
+   so your computer is a Globus endpoint. Keep this repo somewhere under your home
+   folder but **not** in Desktop/Documents/iCloud/Dropbox (macOS privacy
+   rules and cloud sync get in the way of large transfers), e.g. `~/Projects/`.
+3. `cp config/globus.env.example config/globus.env` (defaults are fine for a laptop).
+4. See how big it is before downloading:
+   ```bash
+   scripts/globus_manifest.sh        # writes data/manifests/<time>/summary.csv
+   ```
+5. Mirror it (only reads from the collection; re-run any time to pick up resubmissions):
+   ```bash
+   scripts/globus_sync.sh SubmissionTemplates InputData   # small folders first
+   scripts/globus_sync.sh                                 # everything
+   ```
+   If the data are too big for the laptop, set `DEST_COLLECTION` and `DEST_ROOT`
+   in `config/globus.env` to a Duke cluster collection and folder.
+6. Inventory what each team submitted:
+   ```bash
+   python scripts/local_inventory.py   # -> outputs/inventory/INVENTORY.md, teams.csv, files.csv
+   ```
+
+## Wavelet toolkit in 10 lines
+
+```python
+from shoreshop3 import wavelets as wv, regularize
+
+reg = regularize(obs_time, obs_x, "1D", max_gap="30D")   # irregular obs -> daily grid
+# model_a, model_b: daily model output on the same grid (reg.time)
+bands = {"storm (<1 mo)": (2, 30), "seasonal": (180, 540), "interannual": (540, 2600)}
+skill = wv.compare_models(reg.values, {"A": model_a, "B": model_b}, dt=reg.dt,
+                          bands=bands, invalid_obs=reg.gap, n_surrogates=300)
+coh = wv.wavelet_coherence(reg.values, model_a, reg.dt, invalid_x=reg.gap)
+sig = wv.coherence_significance(len(reg.values), reg.dt, wv.ar1(reg.values), wv.ar1(model_a))
+```
+
+`skill` has one row per model and band. Columns: evaluable share of the record,
+share of observed variance in the band, amplitude ratio, correlation, RMSE, NSE
+of the band-limited signals, mean coherence, share of significant coherence,
+and phase/lag (positive = model lags observations). See
+`notebooks/01_wavelet_demo.ipynb` for figures.
+
+Conventions and caveats:
+
+* Morlet wavelet (omega0 = 6) following Torrence & Compo (1998); coherence
+  smoothing and Monte Carlo significance follow Grinsted et al. (2004).
+  Validated against `pycwt` in `tests/test_wavelets.py`.
+* `dt` can be days, years or metres (alongshore transforms); periods come back
+  in the same unit.
+* Results inside the cone of influence (record edges), or where more than 25 %
+  of a wavelet's energy falls on long filled gaps, are masked out of every
+  statistic (so a short gap only removes short periods).
+* Where a series has essentially no variance at some period (e.g. a smooth
+  model at short periods), coherence is set towards 0 rather than the unstable 0/0.
+* The AR1 red-noise test is a reference background, not proof of a process;
+  shoreline series are very persistent (AR1 close to 1).
+
+## Start the git repository
+
+```bash
+cd ~/Projects/shoreshop3-wavelets
+git init -b main
+git add .
+git status            # check: nothing under data/ or outputs/ is listed
+git commit -m "Project scaffold: Globus mirror, inventory and wavelet toolkit"
+# private GitHub repo with the GitHub CLI:
+gh repo create shoreshop3-wavelets --private --source=. --push
+```
+
+## References
+
+* Torrence, C. & Compo, G. P. (1998). A practical guide to wavelet analysis. *BAMS* 79, 61-78.
+* Torrence, C. & Webster, P. J. (1999). Interdecadal changes in the ENSO-monsoon system. *J. Climate* 12, 2679-2690.
+* Grinsted, A., Moore, J. C. & Jevrejeva, S. (2004). Application of the cross wavelet transform and wavelet coherence to geophysical time series. *Nonlin. Processes Geophys.* 11, 561-566.

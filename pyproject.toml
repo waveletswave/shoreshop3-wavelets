@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shoreshop3"
+version = "0.1.0"
+description = "Organise ShoreShop3 model submissions and compare models with observations across time and space scales using wavelets"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "xarray>=2023.1",
+    "netCDF4>=1.6",
+    "h5py>=3.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "jupyterlab>=4", "ipykernel", "nbformat", "nbclient"]
+globus = ["globus-cli>=3.30"]
+crosscheck = ["pycwt"]  # optional: tests compare our CWT/WTC with pycwt
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

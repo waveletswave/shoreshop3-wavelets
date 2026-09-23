@@ -1,0 +1,22 @@
+# conda env create -f environment.yml && conda activate shoreshop3 && pip install -e .
+name: shoreshop3
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - xarray
+  - netcdf4
+  - h5py
+  - pytest
+  - jupyterlab
+  - ipykernel
+  - nbformat
+  - nbclient
+  - pip
+  - pip:
+      - globus-cli
+      - pycwt
