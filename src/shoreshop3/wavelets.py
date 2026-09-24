@@ -49,6 +49,8 @@ __all__ = [
     "reconstruct",
     "band_rows",
     "scale_average",
+    "band_variance",
+    "resolved_variance",
     "band_variance_fraction",
     "ar1",
     "ar1_noise",
@@ -63,6 +65,8 @@ __all__ = [
     "coherence_significance",
     "band_skill",
     "compare_models",
+    "CONSTANT_NOTE",
+    "is_constant",
 ]
 
 # --- Morlet constants (Torrence & Compo 1998, Tables 1-2) --------------------
@@ -271,9 +275,61 @@ def scale_average(res: CWTResult, band: tuple[float, float]) -> np.ndarray:
     return out * res.variance if res.standardized else out
 
 
-def band_variance_fraction(res: CWTResult, band: tuple[float, float]) -> float:
-    """Fraction of the analysed variance carried by a period band (T&C eq. 14)."""
-    return float(scale_average(res, band).mean() / res.variance)
+def _scale_variance(res: CWTResult, mask: np.ndarray | str | None) -> np.ndarray:
+    """Variance contributed by each scale, (dj dt / C_delta) <|W|^2>_n / s, in squared units.
+
+    ``<.>_n`` averages over the cells selected by ``mask``: None or "valid"
+    (outside the COI and gaps, the default), "all" (every cell, as in T&C
+    eq. 14) or a boolean array (n_scales, n_times). Scales without a selected
+    cell give NaN.
+    """
+    if mask is None or (isinstance(mask, str) and mask == "valid"):
+        mask = res.valid_mask()
+    elif isinstance(mask, str) and mask == "all":
+        mask = np.ones(res.coeffs.shape, bool)
+    mask = np.asarray(mask, bool)
+    if mask.shape != res.coeffs.shape:
+        raise ValueError("mask must have the shape of the coefficients")
+    p = res.power * (res.variance if res.standardized else 1.0)
+    count = mask.sum(axis=1)
+    mean = np.divide(np.where(mask, p, 0.0).sum(axis=1), count, out=np.full(count.shape, np.nan),
+                     where=count > 0)
+    return res.dj * res.dt / C_DELTA * mean / res.scales
+
+
+def band_variance(res: CWTResult, band: tuple[float, float], mask: np.ndarray | str | None = None) -> float:
+    """Variance carried by a period band, in squared units of the series.
+
+    Each scale is averaged over its own trustworthy cells (``mask``, see
+    :func:`_scale_variance`; default: outside the COI and gaps). NaN when the
+    band has no scale or any of its scales has no trustworthy cell.
+    """
+    rows = band_rows(res, band)
+    if not rows.any():
+        return np.nan
+    v = _scale_variance(res, mask)[rows]
+    return float(v.sum()) if np.isfinite(v).all() else np.nan
+
+
+def resolved_variance(res: CWTResult, mask: np.ndarray | str | None = None) -> float:
+    """Total variance over all scales that have at least one trustworthy cell."""
+    return float(np.nansum(_scale_variance(res, mask)))
+
+
+def band_variance_fraction(res: CWTResult, band: tuple[float, float],
+                           mask: np.ndarray | str | None = None) -> float:
+    """Share of the resolved variance carried by a period band.
+
+    Numerator: :func:`band_variance`. Denominator: :func:`resolved_variance`,
+    with the same ``mask``. By default both use only cells outside the cone of
+    influence and away from gaps, each scale over its own valid times, so the
+    shares of adjacent bands add up and periods that cannot be resolved
+    anywhere in the record are left out of the total. ``mask="all"`` gives the
+    classic whole-record decomposition of Torrence & Compo (1998, eq. 14),
+    relative to the resolved total. NaN without support (see band_variance).
+    """
+    total = resolved_variance(res, mask)
+    return band_variance(res, band, mask) / total if total > 0 else np.nan
 
 
 # --- Red-noise background and significance --------------------------------------
@@ -640,29 +696,63 @@ def _circmean(phase: np.ndarray) -> float:
     return float(np.angle(np.exp(1j * phase).mean()))
 
 
-def _band_metrics(wo: CWTResult, wm: CWTResult, coh: CoherenceResult, name: str,
+_METRIC_KEYS = ["valid_frac", "n_valid", "valid_cell_frac", "valid_first", "valid_last", "valid_duration",
+                "n_cycles", "var_frac_obs", "var_frac_model", "std_obs", "std_model", "std_ratio", "corr",
+                "rmse", "nse", "mean_rsq", "sig_frac", "phase_frac", "phase_deg", "lag"]
+CONSTANT_NOTE = "constant series: coherence undefined"
+
+
+def _ratio(a: float, b: float) -> float:
+    return float(a / b) if np.isfinite(a) and np.isfinite(b) and b > 0 else np.nan
+
+
+def is_constant(x, reference) -> bool:
+    """True when ``x`` has (numerically) no variance compared with ``reference``.
+
+    Such a series has no wavelet power, so coherence and phase are undefined;
+    :func:`compare_models` still reports its amplitude scores.
+    """
+    return float(np.var(x)) <= 1e-12 * max(float(np.var(reference)), np.finfo(float).tiny)
+
+
+_is_constant = is_constant
+
+
+def _band_metrics(wo: CWTResult, wm: CWTResult | None, coh: CoherenceResult | None, name: str,
                   band: tuple[float, float], rsq_sig: np.ndarray | None,
                   phase_min_rsq: float = 0.5, min_phase_frac: float = 0.1) -> dict:
+    """Skill metrics for one band. ``wm``/``coh`` None: a constant model (no variability).
+
+    For a constant model the amplitude metrics are well defined (its band signal
+    is zero: std_ratio = 0, NSE close to 0) but coherence and phase are not.
+    """
     rows = band_rows(wo, band)
     out = dict(band=name, period_min=band[0], period_max=band[1], n_scales=int(rows.sum()))
-    nan_keys = ["valid_frac", "n_valid", "var_frac_obs", "var_frac_model", "std_obs",
-                "std_model", "std_ratio", "corr", "rmse", "nse", "mean_rsq", "sig_frac",
-                "phase_frac", "phase_deg", "lag"]
-    out.update({k: np.nan for k in nan_keys})
-    out["n_valid"] = 0
+    out.update({k: np.nan for k in _METRIC_KEYS})
+    out.update(n_valid=0, valid_first=-1, valid_last=-1, note="" if wm is not None else CONSTANT_NOTE)
     if not rows.any():
         return out
 
-    valid = coh.valid_mask()[rows]
-    out["var_frac_obs"] = band_variance_fraction(wo, band)
-    out["var_frac_model"] = band_variance_fraction(wm, band) * wm.variance / wo.variance
+    mask = coh.valid_mask() if coh is not None else wo.valid_mask()  # same cells for obs and model
+    valid = mask[rows]
+    out["valid_cell_frac"] = float(valid.mean())
+    total = resolved_variance(wo, mask)
+    out["var_frac_obs"] = _ratio(band_variance(wo, band, mask), total)
+    out["var_frac_model"] = 0.0 if wm is None else _ratio(band_variance(wm, band, mask), total)
 
     # band-limited signals, compared where every scale of the band is trustworthy
     t_ok = valid.all(axis=0)
+    idx = np.flatnonzero(t_ok)
     out["valid_frac"] = float(t_ok.mean())
-    out["n_valid"] = int(t_ok.sum())
-    if t_ok.sum() >= 3:
-        ob, mb = reconstruct(wo, band)[t_ok], reconstruct(wm, band)[t_ok]
+    out["n_valid"] = int(idx.size)
+    if idx.size:
+        out["valid_first"], out["valid_last"] = int(idx[0]), int(idx[-1])
+        out["valid_duration"] = float(idx.size * wo.dt)
+        if band[0] > 0 and np.isfinite(band[1]):
+            out["n_cycles"] = out["valid_duration"] / float(np.sqrt(band[0] * band[1]))
+    if idx.size >= 3:
+        ob = reconstruct(wo, band)[t_ok]
+        mb = np.zeros_like(ob) if wm is None else reconstruct(wm, band)[t_ok]
         so, sm = ob.std(), mb.std()
         out["std_obs"], out["std_model"] = float(so), float(sm)
         out["std_ratio"] = float(sm / so) if so > 0 else np.nan
@@ -673,7 +763,7 @@ def _band_metrics(wo: CWTResult, wm: CWTResult, coh: CoherenceResult, name: str,
         out["nse"] = float(1.0 - np.sum(err**2) / denom) if denom > 0 else np.nan
 
     # coherence statistics use every trustworthy (scale, time) cell of the band
-    if not valid.any():
+    if coh is None or not valid.any():
         return out
     rsq_b = coh.rsq[rows]
     out["mean_rsq"] = float(rsq_b[valid].mean())
@@ -708,9 +798,15 @@ def band_skill(obs, model, dt: float, bands: Mapping[str, tuple[float, float]], 
 
     Columns
     -------
-    valid_frac     fraction of time steps where the band can be evaluated
-    var_frac_obs   share of observed variance in the band (importance of band)
-    var_frac_model model band variance / observed total variance
+    valid_frac     fraction of time steps where the whole band can be evaluated
+                   (the support of std_ratio .. nse); n_valid is the count
+    valid_first, valid_last  first / last such time step (index; -1 if none)
+    valid_duration valid time steps x dt; n_cycles = valid_duration / band centre period
+    valid_cell_frac fraction of the band's (scale, time) cells that are trustworthy
+                   (the support of the coherence metrics)
+    var_frac_obs   share of the observed resolved variance in the band
+                   (:func:`band_variance_fraction`, trustworthy cells only)
+    var_frac_model model band variance / observed resolved variance
     std_ratio      model / obs standard deviation of the band signal (amplitude)
     corr, rmse     correlation and RMSE of the band-limited signals
     nse            Nash-Sutcliffe efficiency of the band signal (1 = perfect)
@@ -719,6 +815,11 @@ def band_skill(obs, model, dt: float, bands: Mapping[str, tuple[float, float]], 
     phase_frac     fraction of band cells coherent enough to read a phase
     phase_deg      phase of the band cross-spectrum (deg); > 0: model lags obs
     lag            the phase as a time shift (unit of dt); > 0: model lags obs
+    note           "constant series: coherence undefined" for a model without variability
+
+    ``sig_frac`` is a descriptive area fraction: significant cells cluster, so
+    it is not a band-level p-value. ``lag`` is a weighted average over coherent
+    cells and can hide opposite lags at different times.
 
     Signal metrics (std_ratio .. nse) need the whole band outside the COI, so
     long bands may be NaN in short records; coherence metrics use every
@@ -729,8 +830,11 @@ def band_skill(obs, model, dt: float, bands: Mapping[str, tuple[float, float]], 
     obs, model = _check_pair(obs, model)
     kw = dict(dj=dj, s0=s0, J=J, pad=pad, detrend=detrend)
     wo = cwt(obs, dt, invalid=invalid_obs, **kw)
-    wm = cwt(model, dt, invalid=invalid_model, **kw)
-    coh = _coherence_from(wo, wm)
+    if _is_constant(_anomaly(model, detrend), obs):
+        wm = coh = None
+    else:
+        wm = cwt(model, dt, invalid=invalid_model, **kw)
+        coh = _coherence_from(wo, wm)
     return pd.DataFrame([_band_metrics(wo, wm, coh, k, tuple(v), rsq_sig, phase_min_rsq)
                          for k, v in bands.items()])
 
@@ -745,8 +849,10 @@ def compare_models(obs, models: Mapping[str, Sequence[float]], dt: float,
                    alpha_decimals: int = 3) -> pd.DataFrame:
     """Run :func:`band_skill` for several models against the same observations.
 
-    Returns a tidy table with one row per (model, band). Set ``n_surrogates``
-    (e.g. 300) to add Monte Carlo coherence significance (``sig_frac``).
+    Returns a tidy table with one row per (model, band), columns as in
+    :func:`band_skill`. Set ``n_surrogates`` (e.g. 300) to add Monte Carlo
+    coherence significance (``sig_frac``). A model without variability gets
+    amplitude scores and a note instead of stopping the run.
     """
     obs = np.asarray(obs, float)
     kw = dict(dj=dj, s0=s0, J=J, pad=pad, detrend=detrend)
@@ -758,10 +864,13 @@ def compare_models(obs, models: Mapping[str, Sequence[float]], dt: float,
         if series.shape != obs.shape:
             raise ValueError(f"model {name!r} is not on the observation grid")
         inv = None if invalid_models is None else invalid_models.get(name)
-        wm = cwt(series, dt, invalid=inv, **kw)
-        coh = _coherence_from(wo, wm)
         sig = None
-        if n_surrogates:
+        if _is_constant(_anomaly(series, detrend), obs):
+            wm = coh = None  # partial scores only; see _band_metrics
+        else:
+            wm = cwt(series, dt, invalid=inv, **kw)
+            coh = _coherence_from(wo, wm)
+        if n_surrogates and wm is not None:
             a_mod = ar1(_anomaly(series, detrend))
             sig = coherence_significance(obs.size, dt, a_obs, a_mod, dj=dj, s0=wo.scales[0],
                                          J=wo.scales.size - 1, pad=pad,

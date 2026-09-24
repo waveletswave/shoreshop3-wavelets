@@ -159,3 +159,24 @@ def test_build_case_north_profile_and_duplicate_labels(tmp_path):
         duck.build_case(raw, "1006", "2000-02-01", "2003-11-30", submissions=dup)
     with pytest.raises(ValueError, match="sampling"):
         duck.build_case(raw, "1006", "2000-02-01", "2003-11-30", sampling="nearest", submissions=subs)
+
+
+def test_common_window_keeps_every_model(tmp_path):
+    raw = _duck_mirror(tmp_path, gap=False)
+    late = pd.read_csv(raw / "UserSubmissions" / "TeamA" / "Duck" / "mipDuck_1980-2023_perfect.csv")
+    late.loc[pd.to_datetime(late["time"]) < "2001-01-15", ["1", "1006"]] = np.nan
+    late.to_csv(raw / "UserSubmissions" / "TeamA" / "Duck" / "mipDuck_1980-2023_late.csv", index=False)
+    subs = duck.find_submissions(raw, model_table=duck.load_model_table(tmp_path / "missing.csv"))
+    cov = duck.coverage(subs)
+    assert cov.loc[(cov.model == "late") & (cov.profile == "1"), "first"].item() == pd.Timestamp("2001-01-15")
+    start, end, info = duck.common_window(raw, submissions=subs)
+    surveys = duck.read_frf_shoreline(raw, "1").index
+    first_after = surveys[surveys >= "2001-01-15"][0]
+    assert start == first_after.normalize() + pd.Timedelta("1D")
+    assert end == surveys[-1].normalize()  # surveys end before the models do
+    assert "late" in info["start_set_by"] and "surveys" in info["end_set_by"]
+    case = duck.build_case(raw, "1", str(start.date()), str(end.date()), submissions=subs)
+    assert {"perfect", "late"} <= set(case.models)  # the window never needs a day the late model lacks
+    assert "holes" in case.skipped  # an internal gap still disqualifies a model
+    s2, e2, info2 = duck.common_window(raw, submissions=subs, end="2003-06-30")
+    assert e2 == pd.Timestamp("2003-06-30") and info2["end_set_by"] == "--end" and s2 == start

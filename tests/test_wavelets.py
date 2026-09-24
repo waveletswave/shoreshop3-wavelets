@@ -48,9 +48,12 @@ def test_full_reconstruction_and_variance(rng):
     inner = slice(300, -300)
     assert np.corrcoef(x[inner], xr[inner])[0, 1] > 0.99
     assert abs(xr.mean() - x.mean()) < 0.05
-    # T&C eq. 14: wavelet variance ~ series variance (small loss below 2 dt)
-    total = wv.band_variance_fraction(res, (0, np.inf))
+    # T&C eq. 14: wavelet variance over all cells ~ series variance (small loss below 2 dt)
+    total = wv.band_variance(res, (0, np.inf), mask="all") / res.variance
     assert 0.9 < total < 1.05
+    # over trustworthy cells only, some long scales have no support: the full range is NaN
+    assert np.isnan(wv.band_variance(res, (0, np.inf)))
+    assert wv.band_variance_fraction(res, (40, 90)) > 0.5  # the 60-day sine dominates the resolved variance
 
 
 def test_band_reconstruction_separates_components():
@@ -248,3 +251,51 @@ def test_scale_convolution_matches_conv2d(rng):
     for kernel in (wv._scale_kernel(1 / 12), np.array([0.25, 0.5, 0.5, 0.25]), np.ones(1)):
         expected = convolve2d(T, kernel[:, None], mode="same")
         assert np.allclose(wv._convolve_scales(T, kernel), expected)
+
+
+def test_band_variance_ignores_gaps_and_needs_support(rng):
+    n = 2000
+    t = np.arange(n)
+    x = np.sin(2 * np.pi * t / 64) + 0.1 * rng.standard_normal(n)
+    gap = np.zeros(n, bool)
+    gap[900:1100] = True
+    x_bad = x.copy()
+    x_bad[gap] = 5.0 * rng.standard_normal(gap.sum())  # wild "filled" values inside the gap
+    band = (40, 100)
+    clean = wv.band_variance_fraction(wv.cwt(x, 1.0), band)
+    # strict mask so that no coefficient touches the gap (the default tolerates 25 % of the energy)
+    res_bad = wv.cwt(x_bad, 1.0, invalid=gap, max_gap_fraction=1e-3)
+    masked = wv.band_variance_fraction(res_bad, band)
+    whole = wv.band_variance_fraction(res_bad, band, mask="all")
+    assert masked == pytest.approx(clean, abs=0.05)  # masked cells do not enter the share
+    assert whole < clean - 0.2  # counting every cell lets the filled values dominate
+    # no trustworthy time at all: every support-dependent metric is undefined
+    df = wv.band_skill(x, x, 1.0, {"b": band}, invalid_obs=np.ones(n, bool))
+    row = df.iloc[0]
+    assert row["valid_frac"] == 0 and row["n_valid"] == 0 and row["valid_first"] == -1
+    assert np.isnan(row["var_frac_obs"]) and np.isnan(row["nse"]) and np.isnan(row["n_cycles"])
+
+
+def test_support_columns_and_cycles(rng):
+    n = 3000
+    x = np.sin(2 * np.pi * np.arange(n) / 100) + 0.3 * rng.standard_normal(n)
+    df = wv.band_skill(x, x, 2.0, {"b": (150, 250)})
+    row = df.iloc[0]
+    assert 0 < row["valid_first"] < row["valid_last"] < n - 1
+    assert row["valid_duration"] == pytest.approx(row["n_valid"] * 2.0)
+    assert row["n_cycles"] == pytest.approx(row["valid_duration"] / np.sqrt(150 * 250))
+    assert 0 < row["valid_frac"] <= row["valid_cell_frac"] <= 1
+
+
+def test_constant_model_gets_partial_scores(rng):
+    n = 1500
+    obs = np.sin(2 * np.pi * np.arange(n) / 50) + 0.2 * rng.standard_normal(n)
+    df = wv.compare_models(obs, {"flat": np.full(n, 3.0), "good": obs + 0.1 * rng.standard_normal(n)},
+                           1.0, {"b": (30, 80)}, n_surrogates=5)
+    flat = df.set_index("model").loc["flat"]
+    assert flat["note"] == wv.CONSTANT_NOTE
+    assert flat["std_ratio"] == 0 and flat["var_frac_model"] == 0
+    assert -0.05 < flat["nse"] <= 0  # a zero band signal is no better than the mean
+    assert np.isnan(flat["corr"]) and np.isnan(flat["mean_rsq"]) and np.isnan(flat["sig_frac"])
+    good = df.set_index("model").loc["good"]
+    assert good["note"] == "" and good["nse"] > 0.9

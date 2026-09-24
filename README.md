@@ -1,11 +1,12 @@
 # ShoreShop3 wavelet analysis
 
-Organise the ShoreShop3 model submissions and use wavelets to find out **which
-models capture which processes, at which time and space scales**: storm
-response, seasonal cycles, interannual variability, long-term trends and
-alongshore patterns.
+Organise the ShoreShop3 model submissions and compare them with the
+observations using wavelets: at which time scales (and, for the alongshore
+models, which length scales) each model agrees with the observations, and
+where it does not.
 
-The plan and open questions are in [`docs/analysis_plan.md`](docs/analysis_plan.md).
+The plan, known limitations and open questions are in
+[`docs/analysis_plan.md`](docs/analysis_plan.md).
 
 ## Data source
 
@@ -43,7 +44,6 @@ src/shoreshop3/
   inventory.py              inventory helpers used by the scripts
   plotting.py               wavelet power / coherence maps, spectra, skill heatmaps
   paths.py                  project paths (override with SHORESHOP3_DATA)
-notebooks/01_wavelet_demo.ipynb   the full method on synthetic data
 tests/                      pytest suite (synthetic signals with known answers)
 data/                       raw/ interim/ processed/ manifests/  (git-ignored)
 outputs/                    figures and tables (git-ignored)
@@ -94,21 +94,27 @@ Needs `InputData/hindcast_1980_2023/shorelines_and_profiles/FRF_Profiles.zip` an
 the teams' `mipDuck_1980-2023*.csv` files in `data/raw/`.
 
 ```bash
-python scripts/duck_wavelets.py             # ~1-10 min; figures + tables in outputs/duck_1980-2023/
-python scripts/duck_wavelets.py --profiles 1006 --end 2017-06-13 \
+python scripts/duck_wavelets.py             # figures + tables in outputs/duck_1980-2023/
+python scripts/duck_wavelets.py --profiles 1006 --end 2017-06-13 --no-maps \
     --out outputs/duck_1980-2023_1006_pre2017 --note "Profile 1006 before the June 2017 step"
 ```
 
-* Surveys at FRF profiles yFRF = 1 and 1006 go on a weekly grid over the window
-  every model covers (1988-03 to 2019-11); gaps > 60 days are masked. Models are
-  read on the survey days and interpolated the same way (`--sampling surveys`),
-  so both carry the same sampling filter.
+* Surveys at FRF profiles yFRF = 1 and 1006 go on a weekly grid over the
+  longest window that the surveys and every model cover. The window is found
+  automatically and the README of the run names the submission that sets each
+  end; `--start` and `--end` fix it by hand. Gaps longer than 60 days are masked.
+* Models are read on the survey days and interpolated the same way
+  (`--sampling surveys`), so both series carry the same sampling filter.
 * Model labels and provisional families: `config/duck_models.csv` (a new
   submission without a row still runs, labelled by its file name).
-* `outputs/duck_1980-2023/README.md` lists the best models per band, family
-  medians, trends, data checks (outliers, steps, duplicate submissions) and caveats.
-* Coherence significance levels are cached in `data/interim/wtc_sig/`, so
-  re-runs take about a minute.
+* Figures are written as PNG (300 dpi; the two atlases 220 dpi) and PDF
+  (`--dpi`, `--no-pdf`); the one-per-model maps in `wtc/` are PNG only.
+* `outputs/duck_1980-2023/README.md` lists the results by band (with the dates
+  and number of cycles behind each score), family and team medians, trends,
+  data checks (outliers, steps, duplicate or constant submissions) and caveats.
+* Coherence significance levels are cached in `data/interim/wtc_sig/`: the
+  first run takes about 5 minutes, later runs about 1 minute (a new window
+  length needs a new cache).
 
 ## Wavelet toolkit in 10 lines
 
@@ -117,18 +123,19 @@ from shoreshop3 import wavelets as wv, regularize
 
 reg = regularize(obs_time, obs_x, "1D", max_gap="30D")   # irregular obs -> daily grid
 # model_a, model_b: daily model output on the same grid (reg.time)
-bands = {"storm (<1 mo)": (2, 30), "seasonal": (180, 540), "interannual": (540, 2600)}
+bands = {"1-6 months": (30, 180), "annual": (180, 540), "interannual": (540, 2600)}
 skill = wv.compare_models(reg.values, {"A": model_a, "B": model_b}, dt=reg.dt,
                           bands=bands, invalid_obs=reg.gap, n_surrogates=300)
 coh = wv.wavelet_coherence(reg.values, model_a, reg.dt, invalid_x=reg.gap)
 sig = wv.coherence_significance(len(reg.values), reg.dt, wv.ar1(reg.values), wv.ar1(model_a))
 ```
 
-`skill` has one row per model and band. Columns: evaluable share of the record,
-share of observed variance in the band, amplitude ratio, correlation, RMSE, NSE
-of the band-limited signals, mean coherence, share of significant coherence,
-and phase/lag (positive = model lags observations). See
-`notebooks/01_wavelet_demo.ipynb` for figures.
+`skill` has one row per model and band. Columns: the support of each score
+(share of the record, first and last usable time, number of cycles), the
+band's share of the observed variance, amplitude ratio, correlation, RMSE, NSE
+of the band-limited signals, mean coherence, share of the band with significant
+coherence, and phase/lag (positive = model lags observations). A model without
+variability gets amplitude scores and a note instead of stopping the run.
 
 Conventions and caveats:
 
@@ -138,12 +145,17 @@ Conventions and caveats:
 * `dt` can be days, years or metres (alongshore transforms); periods come back
   in the same unit.
 * Results inside the cone of influence (record edges), or where more than 25 %
-  of a wavelet's energy falls on long filled gaps, are masked out of every
-  statistic (so a short gap only removes short periods).
+  of a wavelet's energy falls on long filled gaps, are left out of every
+  statistic, including the variance shares (so a short gap only removes short
+  periods). The coherence mask does not yet include the extra spread from the
+  coherence smoothing.
 * Where a series has essentially no variance at some period (e.g. a smooth
   model at short periods), coherence is set towards 0 rather than the unstable 0/0.
 * The AR1 red-noise test is a reference background, not proof of a process;
-  shoreline series are very persistent (AR1 close to 1).
+  shoreline series are very persistent (AR1 close to 1). For interpolated
+  surveys the surrogates do not yet reproduce the sampling, and the share of
+  significant cells is descriptive, not a band-level test (see
+  `docs/analysis_plan.md`).
 
 ## Start the git repository
 

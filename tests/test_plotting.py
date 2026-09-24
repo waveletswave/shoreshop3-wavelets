@@ -117,3 +117,12 @@ def test_model_colors_limit():
     assert sp.model_colors(["a", "b"]) == {"a": sp.CATEGORICAL[0], "b": sp.CATEGORICAL[1]}
     with pytest.raises(ValueError, match="facet"):
         sp.model_colors([str(i) for i in range(9)])
+
+
+def test_global_spectra_units_do_not_depend_on_standardising():
+    x = 7.0 * np.random.default_rng(3).standard_normal(600)  # variance ~50
+    fig, ax = plt.subplots()
+    sp.plot_global_spectra({"obs": wv.cwt(x, 1.0), "std": wv.cwt(x, 1.0, standardize=True)}, ax=ax)
+    a, b = ax.lines[0].get_ydata(), ax.lines[1].get_ydata()
+    ok = np.isfinite(a) & np.isfinite(b)
+    assert np.allclose(a[ok], b[ok])

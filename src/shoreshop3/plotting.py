@@ -16,6 +16,7 @@ down = observations lead (model lags) by 90 deg, up = model leads by 90 deg.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Mapping, Sequence
 
 import matplotlib as mpl
@@ -32,7 +33,7 @@ __all__ = [
     "use_style", "model_colors", "plot_series", "plot_power", "power_levels", "log2_ticks",
     "plot_coherence",
     "plot_global_spectra", "plot_global_power", "plot_skill_heatmap", "plot_spectral_ratio",
-    "legend_patches",
+    "legend_patches", "compact_pdf_images",
 ]
 
 SURFACE = "#fcfcfb"
@@ -65,6 +66,7 @@ def use_style() -> None:
         "lines.linewidth": 1.5, "lines.solid_capstyle": "round",
         "legend.frameon": False, "legend.fontsize": 9, "font.size": 10,
         "font.family": "sans-serif", "figure.dpi": 110,
+        "pdf.fonttype": 42, "ps.fonttype": 42,  # editable text in PDF/EPS
     })
 
 
@@ -130,11 +132,47 @@ def _coi_wash(ax, x: np.ndarray, coi: np.ndarray, lo: float, hi: float) -> None:
     ax.plot(x, c, color=INK_2, linewidth=0.8, zorder=4)
 
 
+@contextmanager
+def compact_pdf_images():
+    """Keep only the cropped pixels of each rasterised layer while a PDF is written.
+
+    matplotlib's mixed-mode renderer hands the PDF backend a *view* into a
+    full-figure raster for every rasterised artist, and the backend keeps it
+    until the file is closed, so a figure with many rasterised panels can
+    hold gigabytes. Copying the cropped image when it is drawn keeps memory
+    proportional to the pixels actually used. Use around ``fig.savefig(...pdf)``.
+    """
+    from matplotlib.backends import backend_pdf
+
+    renderer = getattr(backend_pdf, "RendererPdf", None)
+    original = getattr(renderer, "draw_image", None)
+    if original is None:  # unknown matplotlib layout: save as usual
+        yield
+        return
+
+    def draw_image(self, gc, x, y, im, *args, **kwargs):
+        return original(self, gc, x, y, np.array(im, copy=True), *args, **kwargs)
+
+    renderer.draw_image = draw_image
+    try:
+        yield
+    finally:
+        renderer.draw_image = original
+
+
+def _rasterize(artist) -> None:
+    """Rasterise a dense filled layer in vector output (PDF); no effect on PNG."""
+    if hasattr(artist, "set_rasterized"):
+        artist.set_rasterized(True)
+    for coll in getattr(artist, "collections", []) or []:  # matplotlib < 3.8 contour sets
+        coll.set_rasterized(True)
+
+
 def _gap_wash(ax, x: np.ndarray, per: np.ndarray, gap_mask: np.ndarray) -> None:
     """Wash out cells dominated by data gaps and outline them."""
     if gap_mask.any():
         bad = gap_mask.astype(float)
-        ax.contourf(x, per, bad, levels=[0.5, 1.5], colors=[SURFACE], alpha=0.72, zorder=3)
+        _rasterize(ax.contourf(x, per, bad, levels=[0.5, 1.5], colors=[SURFACE], alpha=0.72, zorder=3))
         ax.contour(x, per, bad, levels=[0.5], colors=[INK_2], linewidths=0.8, zorder=4)
 
 
@@ -231,6 +269,7 @@ def plot_power(res: CWTResult, *, time=None, ax=None, alpha: float | None = None
             levels = np.arange(vmin_log2, vmax_log2 + 0.25, 0.5)
     per = res.periods * period_scale
     cf = ax.contourf(x, per, lp, levels=levels, cmap=SEQUENTIAL, extend="both")
+    _rasterize(cf)
     if alpha is not None:
         thr = power_significance(res, alpha, level)
         ax.contour(x, per, p / thr[:, None], levels=[1.0], colors=INK, linewidths=0.9)
@@ -270,6 +309,7 @@ def plot_coherence(coh: CoherenceResult, *, time=None, ax=None, sig: np.ndarray 
     x, is_date = _xvalues(n, coh.dt, time)
     per = coh.periods * period_scale
     cf = ax.contourf(x, per, coh.rsq, levels=np.linspace(0, 1, 11), cmap=SEQUENTIAL)
+    _rasterize(cf)
     if sig is not None:
         ratio = coh.rsq / np.where(np.isfinite(sig), sig, np.inf)[:, None]
         ax.contour(x, per, ratio, levels=[1.0], colors=INK, linewidths=0.9)
@@ -313,7 +353,7 @@ def plot_global_spectra(results: Mapping[str, CWTResult], *, obs_key: str = "obs
     colors = dict(colors or model_colors(models))
     for name, res in results.items():
         gws, _ = global_spectrum(res)
-        power = gws * (1.0 if res.standardized else res.variance)
+        power = gws * res.variance  # normalised power -> squared units, standardised or not
         is_obs = name == obs_key
         ax.plot(res.periods * period_scale, power, color=INK if is_obs else colors[name],
                 linewidth=2.0 if is_obs else 1.5, label=obs_label if is_obs else name,
@@ -342,7 +382,8 @@ def plot_global_power(res: CWTResult, *, ax=None, alpha: float | None = None, le
 
     Time-averaged power outside the COI and gaps in physical units (ink), the
     AR1 ``level`` significance line (dashed) and, per band (limits in the
-    units of ``res.periods``), the share of the variance in that band.
+    units of ``res.periods``), the band's share of the resolved variance
+    (:func:`shoreshop3.wavelets.band_variance_fraction`, same trustworthy cells).
     """
     from matplotlib.transforms import blended_transform_factory
 
@@ -377,7 +418,8 @@ def plot_global_power(res: CWTResult, *, ax=None, alpha: float | None = None, le
         for lo, hi in bands.values():
             mid = np.sqrt(lo * hi) * period_scale
             if per.min() <= mid <= per.max():
-                ax.text(0.97, mid, f"{band_variance_fraction(res, (lo, hi)):.0%}", transform=trans,
+                share = band_variance_fraction(res, (lo, hi))
+                ax.text(0.97, mid, f"{share:.0%}" if np.isfinite(share) else "–", transform=trans,
                         ha="right", va="center", fontsize=9, color=INK_2)
     ax.legend(loc="lower left", fontsize=8, handlelength=1.8)
     if title:
@@ -394,7 +436,7 @@ _METRICS = {
                       label="Model / observed amplitude", transform=np.log2,
                       ticks=([-2, -1, 0, 1, 2], ["×0.25", "×0.5", "×1", "×2", "×4"])),
     "mean_rsq": dict(cmap=SEQUENTIAL, norm=Normalize(0.0, 1.0), label="Coherence R²"),
-    "sig_frac": dict(cmap=SEQUENTIAL, norm=Normalize(0.0, 1.0), label="Share significant"),
+    "sig_frac": dict(cmap=SEQUENTIAL, norm=Normalize(0.0, 1.0), label="Coherent share"),
     "var_frac_obs": dict(cmap=SEQUENTIAL, norm=Normalize(0.0, 1.0), label="Share of obs. variance"),
     "valid_frac": dict(cmap=SEQUENTIAL, norm=Normalize(0.0, 1.0), label="Share evaluable"),
     "phase_deg": dict(cmap=DIVERGING, norm=TwoSlopeNorm(vmin=-90.0, vcenter=0.0, vmax=90.0),
@@ -514,8 +556,9 @@ def plot_spectral_ratio(periods: np.ndarray, ratios: pd.DataFrame, *, ax=None,
     per = np.asarray(periods, float) * period_scale
     edges = np.sqrt(per[:-1] * per[1:])
     edges = np.r_[per[0] ** 2 / edges[0], edges, per[-1] ** 2 / edges[-1]]
+    r = ratios.to_numpy(float)
     with np.errstate(divide="ignore", invalid="ignore"):
-        z = np.log2(ratios.to_numpy(float))
+        z = np.log2(np.where(r == 0, 2.0 ** (-lim_log2 - 1), r))  # a constant model: far too little
     cmap = DIVERGING.with_extremes(bad=GRID)
     norm = TwoSlopeNorm(vmin=-lim_log2, vcenter=0.0, vmax=lim_log2)
     rows = list(ratios.index)

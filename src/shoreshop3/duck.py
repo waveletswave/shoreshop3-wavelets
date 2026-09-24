@@ -38,6 +38,8 @@ __all__ = [
     "read_frf_shoreline",
     "find_submissions",
     "team_folders",
+    "coverage",
+    "common_window",
     "load_model_table",
     "DuckCase",
     "build_case",
@@ -154,6 +156,75 @@ def team_folders(raw_root: str | Path) -> list[str]:
     names = {p.name for top in _TEAM_TOPS if (raw_root / top).is_dir()
              for p in (raw_root / top).iterdir() if p.is_dir() and not p.name.startswith(".")}
     return sorted(names, key=str.lower)
+
+
+def coverage(submissions: pd.DataFrame, profiles=PROFILES) -> pd.DataFrame:
+    """First and last day with a value, per submission and profile (unreadable files left out)."""
+    rows = []
+    for r in submissions.itertuples():
+        try:
+            df = read_submission(r.path)
+        except (ValueError, KeyError, UnicodeDecodeError, pd.errors.ParserError):
+            continue
+        for p in profiles:
+            if str(p) in df.columns:
+                s = df[str(p)].dropna()
+                if len(s):
+                    rows.append(dict(model=r.model, profile=str(p), first=s.index.min(), last=s.index.max()))
+    return pd.DataFrame(rows, columns=["model", "profile", "first", "last"])
+
+
+def common_window(raw_root: str | Path, profiles=PROFILES, submissions: pd.DataFrame | None = None,
+                  start: str | None = None, end: str | None = None) -> tuple[pd.Timestamp, pd.Timestamp, dict]:
+    """Longest window covered by the surveys and by every submission, for the given profiles.
+
+    The start is the day after the first survey on or after the latest model
+    start (so the survey just before the first grid point is covered by every
+    model); the end is the day of the last survey on or before the earliest
+    model end. Pass ``start`` or ``end`` to fix one of them. Returns (start,
+    end, info); info["start_set_by"] / info["end_set_by"] name the limiting
+    submissions (or the surveys).
+    """
+    subs = find_submissions(raw_root) if submissions is None else submissions
+    cov = coverage(subs, profiles)
+    m_start = cov["first"].max() if len(cov) else pd.Timestamp("1800-01-01")
+    m_end = cov["last"].min() if len(cov) else pd.Timestamp("2200-01-01")
+    lims = []
+    for p in profiles:
+        t = read_frf_shoreline(raw_root, p).index
+        after = t[t >= m_start]
+        before = t[t < m_end.normalize() + pd.Timedelta("1D")]
+        if not len(after) or not len(before):
+            raise ValueError(f"the surveys at profile {p} do not overlap the submissions")
+        lims.append(dict(profile=str(p), start=after[0].normalize() + pd.Timedelta("1D"),
+                         end=before[-1].normalize(), surveys_start_later=t[0] >= m_start,
+                         surveys_end_earlier=t[-1] < m_end.normalize() + pd.Timedelta("1D")))
+    lims = pd.DataFrame(lims)
+
+    def _models(col, value):
+        rows = cov.loc[cov[col] == value, ["model", "profile"]].drop_duplicates()
+        return ", ".join(f"{r.model} at profile {r.profile}" for r in rows.itertuples())
+
+    info = {}
+    if start is None:
+        row = lims.loc[lims["start"].idxmax()]
+        s = row["start"]
+        info["start_set_by"] = (f"the first surveys at profile {row['profile']}" if row["surveys_start_later"]
+                                else _models("first", m_start))
+    else:
+        s = pd.Timestamp(start)
+        info["start_set_by"] = "--start"
+    if end is None:
+        row = lims.loc[lims["end"].idxmin()]
+        e = row["end"]
+        info["end_set_by"] = (f"the last surveys at profile {row['profile']}" if row["surveys_end_earlier"]
+                              else _models("last", m_end))
+    else:
+        e = pd.Timestamp(end)
+        info["end_set_by"] = "--end"
+    if e <= s:
+        raise ValueError(f"empty window: {s.date()} to {e.date()}")
+    return s, e, info
 
 
 @dataclass
