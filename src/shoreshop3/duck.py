@@ -39,6 +39,11 @@ __all__ = [
     "find_submissions",
     "team_folders",
     "coverage",
+    "coverage_problem",
+    "needed_days",
+    "WINDOW_MODES",
+    "Window",
+    "choose_window",
     "common_window",
     "load_model_table",
     "DuckCase",
@@ -174,57 +179,146 @@ def coverage(submissions: pd.DataFrame, profiles=PROFILES) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["model", "profile", "first", "last"])
 
 
+WINDOW_MODES = ("surveys", "common")
+_DAY = pd.Timedelta("1D")
+
+
+def needed_days(t: pd.DatetimeIndex, start, end) -> pd.DatetimeIndex:
+    """Survey times whose values enter a grid over [start, end].
+
+    Those inside the window plus the enclosing survey on each side (linear
+    interpolation of the first and last grid points uses them).
+    """
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    i0 = max(int(np.searchsorted(t, start, side="right")) - 1, 0)
+    i1 = min(int(np.searchsorted(t, end, side="left")), t.size - 1)
+    return t[i0:i1 + 1]
+
+
+def coverage_problem(daily: pd.Series, days) -> str | None:
+    """Why a daily model series cannot be read on ``days``; None if it can.
+
+    ``days`` are the survey days that enter the grid (see :func:`needed_days`),
+    so the first one can lie a little before the window start.
+    """
+    days = pd.DatetimeIndex(days).normalize()
+    vals = daily.reindex(days)
+    if not vals.isna().any():
+        return None
+    s = daily.dropna()
+    if s.empty:
+        return "no values"
+    if s.index.min() > days.min():
+        return f"starts {s.index.min().date()}, after the first day needed ({days.min().date()})"
+    if s.index.max() < days.max():
+        return f"ends {s.index.max().date()}, before the last day needed ({days.max().date()})"
+    return f"no value on {int(vals.isna().sum())} of {len(days)} days needed inside the window"
+
+
+@dataclass
+class Window:
+    """Analysis window and what set its limits."""
+
+    start: pd.Timestamp
+    end: pd.Timestamp
+    mode: str
+    start_set_by: str
+    end_set_by: str
+    #: "model at profile p" -> reason, for models set aside while fixing a common window
+    set_aside: dict[str, str] = field(default_factory=dict)
+
+
+def choose_window(raw_root: str | Path, profiles=PROFILES, submissions: pd.DataFrame | None = None,
+                  mode: str = "surveys", start: str | None = None, end: str | None = None) -> Window:
+    """Analysis window for the given profiles.
+
+    ``mode="surveys"`` (default): the whole survey record shared by the
+    profiles, from the day after the first survey to the day of the last one.
+    Models that do not cover it take no part; :func:`build_case` says why.
+
+    ``mode="common"``: the longest window covered by the surveys and by every
+    model that can take part. The models are checked first: one that lacks a
+    value on a day the grid needs is set aside and the window is recomputed
+    without it, until nobody is set aside. A model that cannot take part
+    therefore never shortens the window for the others.
+
+    ``start`` / ``end`` fix either limit by hand.
+    """
+    if mode not in WINDOW_MODES:
+        raise ValueError(f"mode must be one of {WINDOW_MODES}")
+    fixed_s = None if start is None else pd.Timestamp(start)
+    fixed_e = None if end is None else pd.Timestamp(end)
+    surveys = {str(p): read_frf_shoreline(raw_root, p).index for p in profiles}
+    s_surv = max(t[0].normalize() + _DAY for t in surveys.values())
+    e_surv = min(t[-1].normalize() for t in surveys.values())
+    if mode == "surveys":
+        s = s_surv if fixed_s is None else fixed_s
+        e = e_surv if fixed_e is None else fixed_e
+        if e <= s:
+            raise ValueError(f"empty window: {s.date()} to {e.date()}")
+        return Window(s, e, mode, "set by hand" if fixed_s is not None else "the first surveys",
+                      "set by hand" if fixed_e is not None else "the last surveys")
+
+    subs = find_submissions(raw_root) if submissions is None else submissions
+    active = {}
+    for r in subs.itertuples():
+        try:
+            df = read_submission(r.path)
+        except (ValueError, KeyError, UnicodeDecodeError, pd.errors.ParserError):
+            continue
+        for p in surveys:
+            if p in df.columns and df[p].notna().any():
+                active[(r.model, p)] = df[p].asfreq("1D")
+    set_aside = {}
+    while True:
+        if not active:
+            raise ValueError("no submission can take part in any window")
+        m_start = max(v.first_valid_index() for v in active.values())
+        m_end = min(v.last_valid_index() for v in active.values())
+        s_by_p, e_by_p = {}, {}
+        for p, t in surveys.items():
+            after, before = t[t >= m_start], t[t < m_end.normalize() + _DAY]
+            if not len(after) or not len(before):
+                raise ValueError(f"the surveys at profile {p} do not overlap the submissions")
+            s_by_p[p] = after[0].normalize() + _DAY
+            e_by_p[p] = before[-1].normalize()
+        s = max(s_by_p.values()) if fixed_s is None else fixed_s
+        e = min(e_by_p.values()) if fixed_e is None else fixed_e
+        if e <= s:
+            raise ValueError(f"empty window: {s.date()} to {e.date()}")
+        failed = {k: coverage_problem(v, needed_days(surveys[k[1]], s, e)) for k, v in active.items()}
+        failed = {k: why for k, why in failed.items() if why}
+        if not failed:
+            break
+        for (m, p), why in failed.items():
+            set_aside[f"{m} at profile {p}"] = why
+            del active[(m, p)]
+
+    def _names(which: str, value) -> str:
+        keys = [k for k, v in active.items()
+                if (v.first_valid_index() if which == "first" else v.last_valid_index()) == value]
+        return ", ".join(f"{m} at profile {p}" for m, p in keys)
+
+    if fixed_s is not None:
+        start_by = "set by hand"
+    else:
+        p_bind = max(s_by_p, key=s_by_p.get)
+        start_by = "the first surveys" if surveys[p_bind][0] >= m_start else _names("first", m_start)
+    if fixed_e is not None:
+        end_by = "set by hand"
+    else:
+        p_bind = min(e_by_p, key=e_by_p.get)
+        end_by = "the last surveys" if surveys[p_bind][-1] < m_end.normalize() + _DAY else _names("last", m_end)
+    return Window(s, e, mode, start_by, end_by, set_aside)
+
+
 def common_window(raw_root: str | Path, profiles=PROFILES, submissions: pd.DataFrame | None = None,
                   start: str | None = None, end: str | None = None) -> tuple[pd.Timestamp, pd.Timestamp, dict]:
-    """Longest window covered by the surveys and by every submission, for the given profiles.
-
-    The start is the day after the first survey on or after the latest model
-    start (so the survey just before the first grid point is covered by every
-    model); the end is the day of the last survey on or before the earliest
-    model end. Pass ``start`` or ``end`` to fix one of them. Returns (start,
-    end, info); info["start_set_by"] / info["end_set_by"] name the limiting
-    submissions (or the surveys).
-    """
-    subs = find_submissions(raw_root) if submissions is None else submissions
-    cov = coverage(subs, profiles)
-    m_start = cov["first"].max() if len(cov) else pd.Timestamp("1800-01-01")
-    m_end = cov["last"].min() if len(cov) else pd.Timestamp("2200-01-01")
-    lims = []
-    for p in profiles:
-        t = read_frf_shoreline(raw_root, p).index
-        after = t[t >= m_start]
-        before = t[t < m_end.normalize() + pd.Timedelta("1D")]
-        if not len(after) or not len(before):
-            raise ValueError(f"the surveys at profile {p} do not overlap the submissions")
-        lims.append(dict(profile=str(p), start=after[0].normalize() + pd.Timedelta("1D"),
-                         end=before[-1].normalize(), surveys_start_later=t[0] >= m_start,
-                         surveys_end_earlier=t[-1] < m_end.normalize() + pd.Timedelta("1D")))
-    lims = pd.DataFrame(lims)
-
-    def _models(col, value):
-        rows = cov.loc[cov[col] == value, ["model", "profile"]].drop_duplicates()
-        return ", ".join(f"{r.model} at profile {r.profile}" for r in rows.itertuples())
-
-    info = {}
-    if start is None:
-        row = lims.loc[lims["start"].idxmax()]
-        s = row["start"]
-        info["start_set_by"] = (f"the first surveys at profile {row['profile']}" if row["surveys_start_later"]
-                                else _models("first", m_start))
-    else:
-        s = pd.Timestamp(start)
-        info["start_set_by"] = "--start"
-    if end is None:
-        row = lims.loc[lims["end"].idxmin()]
-        e = row["end"]
-        info["end_set_by"] = (f"the last surveys at profile {row['profile']}" if row["surveys_end_earlier"]
-                              else _models("last", m_end))
-    else:
-        e = pd.Timestamp(end)
-        info["end_set_by"] = "--end"
-    if e <= s:
-        raise ValueError(f"empty window: {s.date()} to {e.date()}")
-    return s, e, info
+    """:func:`choose_window` with ``mode="common"``, returned as (start, end, info)."""
+    w = choose_window(raw_root, profiles, submissions, mode="common", start=start, end=end)
+    info = {"start_set_by": "--start" if start is not None else w.start_set_by,
+            "end_set_by": "--end" if end is not None else w.end_set_by, "set_aside": w.set_aside}
+    return w.start, w.end, info
 
 
 @dataclass
@@ -270,10 +364,7 @@ def build_case(raw_root: str | Path, profile: str, start: str, end: str, *, step
     reg = regularize(obs_raw.index, obs_raw.to_numpy(), step, max_gap=max_gap, start=start, end=end)
     grid = pd.DatetimeIndex(reg.time)
     # surveys that shape the grid values: the window plus the enclosing survey on each side
-    t = obs_raw.index
-    i0 = max(int(np.searchsorted(t, grid[0], side="right")) - 1, 0)
-    i1 = min(int(np.searchsorted(t, grid[-1], side="left")), t.size - 1)
-    t_used = t[i0:i1 + 1]
+    t_used = needed_days(obs_raw.index, grid[0], grid[-1])
     subs = find_submissions(raw_root) if submissions is None else submissions
     win = int(round(pd.Timedelta(step) / pd.Timedelta("1D")))
     models, kept, skipped = {}, [], {}
@@ -288,18 +379,19 @@ def build_case(raw_root: str | Path, profile: str, start: str, end: str, *, step
             continue
         daily = df[profile].asfreq("1D")
         if sampling == "surveys":
-            at_surveys = daily.reindex(t_used.normalize()).to_numpy(float)
-            if np.isnan(at_surveys).any():
-                skipped[row["model"]] = (f"no value on {int(np.isnan(at_surveys).sum())} of {t_used.size} "
-                                         f"survey days in {start}..{end}")
+            why = coverage_problem(daily, t_used)
+            if why:
+                skipped[row["model"]] = why
                 continue
+            at_surveys = daily.reindex(t_used.normalize()).to_numpy(float)
             vals = regularize(t_used, at_surveys, step, max_gap=max_gap, start=start, end=end).values
         else:
             smooth = daily.rolling(win, center=True, min_periods=max(1, win // 2 + 1)).mean() if win > 1 else daily
-            vals = smooth.reindex(grid).to_numpy(float)
-            if np.isnan(vals).any():
-                skipped[row["model"]] = f"{int(np.isnan(vals).sum())} of {vals.size} grid points missing in {start}..{end}"
+            why = coverage_problem(smooth, grid)
+            if why:
+                skipped[row["model"]] = why
                 continue
+            vals = smooth.reindex(grid).to_numpy(float)
         if row["model"] in models:
             raise ValueError(f"duplicate model label {row['model']!r}; make labels unique in config/duck_models.csv")
         models[row["model"]] = vals

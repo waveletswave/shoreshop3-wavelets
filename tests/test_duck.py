@@ -180,3 +180,44 @@ def test_common_window_keeps_every_model(tmp_path):
     assert "holes" in case.skipped  # an internal gap still disqualifies a model
     s2, e2, info2 = duck.common_window(raw, submissions=subs, end="2003-06-30")
     assert e2 == pd.Timestamp("2003-06-30") and info2["end_set_by"] == "--end" and s2 == start
+
+
+def _with_short_gappy_model(tmp_path):
+    raw = _duck_mirror(tmp_path, gap=False)
+    team = raw / "UserSubmissions" / "TeamA" / "Duck"
+    full = pd.read_csv(team / "mipDuck_1980-2023_perfect.csv")
+    t = pd.to_datetime(full["time"])
+    short = full.copy()
+    short.loc[(t < "2001-01-15") | (t > "2002-12-01"), ["1", "1006"]] = np.nan  # shorter record
+    short.loc[(t > "2002-01-01") & (t < "2002-02-01"), ["1", "1006"]] = np.nan  # and an internal gap
+    short.to_csv(team / "mipDuck_1980-2023_shortgappy.csv", index=False)
+    (team / "mipDuck_1980-2023_holes.csv").unlink()
+    subs = duck.find_submissions(raw, model_table=duck.load_model_table(tmp_path / "missing.csv"))
+    return raw, subs
+
+
+def test_common_window_is_not_shortened_by_a_model_that_cannot_take_part(tmp_path):
+    raw, subs = _with_short_gappy_model(tmp_path)
+    w = duck.choose_window(raw, ["1"], subs, mode="common")
+    reference = duck.choose_window(raw, ["1"], subs[subs["model"] != "shortgappy"], mode="common")
+    assert (w.start, w.end) == (reference.start, reference.end)  # as if the gappy model were absent
+    assert "shortgappy at profile 1" in w.set_aside
+    assert "inside the window" in w.set_aside["shortgappy at profile 1"]
+    case = duck.build_case(raw, "1", str(w.start.date()), str(w.end.date()), submissions=subs)
+    assert "perfect" in case.models and "shortgappy" in case.skipped
+
+
+def test_survey_window_uses_the_whole_record_and_explains_exclusions(tmp_path):
+    raw, subs = _with_short_gappy_model(tmp_path)
+    w = duck.choose_window(raw, ["1", "1006"], subs)  # default: the whole survey record
+    t1, t2 = duck.read_frf_shoreline(raw, "1").index, duck.read_frf_shoreline(raw, "1006").index
+    assert w.mode == "surveys" and w.start_set_by == "the first surveys" and w.end_set_by == "the last surveys"
+    assert w.start == max(t1[0], t2[0]).normalize() + pd.Timedelta("1D")
+    assert w.end == min(t1[-1], t2[-1]).normalize()
+    case = duck.build_case(raw, "1", str(w.start.date()), str(w.end.date()), submissions=subs)
+    assert "perfect" in case.models
+    assert case.skipped["shortgappy"].startswith("starts 2001-01-15, after the first day needed (")
+    w2 = duck.choose_window(raw, ["1"], subs, end="2002-06-30")
+    assert w2.end == pd.Timestamp("2002-06-30") and w2.end_set_by == "set by hand"
+    with pytest.raises(ValueError, match="mode"):
+        duck.choose_window(raw, ["1"], subs, mode="longest")

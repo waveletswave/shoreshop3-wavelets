@@ -4,28 +4,34 @@
 First analysis: the 1980-2023 single-profile hindcasts at the Duck profiles
 yFRF = 1 and 1006. For every ``mipDuck_1980-2023*.csv`` under data/raw:
 
-1. FRF surveys go on a weekly grid over the longest window that the surveys
-   and every model cover (found automatically; see --start/--end); survey
-   gaps longer than 60 days are masked. Each model is read on the survey days
-   and interpolated the same way (``--sampling surveys``), so both series
-   carry the same sampling filter.
+1. FRF surveys go on a weekly grid over the whole survey record (from October
+   1980; ``--window surveys``). Models that do not cover it are listed with the
+   reason and can be compared over a shorter common window (``--window
+   common``). Survey gaps longer than 60 days are masked. Each model is read on
+   the survey days and interpolated the same way (``--sampling surveys``), so
+   both series carry the same sampling filter.
 2. Observed wavelet power, model/observed variance by period, wavelet
    coherence with red-noise significance, and skill per period band.
 3. Tables and figures (PNG and PDF) go to outputs/duck_1980-2023/ (see
    README.md there).
 
 Usage:  python scripts/duck_wavelets.py            (about 5 minutes the first time)
-        python scripts/duck_wavelets.py --n-surrogates 100 --no-maps   (quick look)
+        python scripts/duck_wavelets.py --window common --out outputs/duck_1980-2023_common
+            (every run that covers a shorter common window, including those that start later)
         python scripts/duck_wavelets.py --profiles 1006 --end 2017-06-13 --no-maps \\
             --out outputs/duck_1980-2023_1006_pre2017      (before the June 2017 step)
+        python scripts/duck_wavelets.py --n-surrogates 100 --no-maps   (quick look)
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
+import platform
 import re
+import subprocess
 import sys
 import textwrap
 import time
@@ -133,9 +139,12 @@ def save(fig, path: Path, args, dpi: int | None = None, pdf: bool = True) -> Pat
 # --- data checks -------------------------------------------------------------------------------
 
 def survey_checks(case: duck.DuckCase, max_gap_days: float) -> dict:
-    """Sampling statistics, isolated spikes and persistent steps in the surveys of the window."""
-    t0, t1 = pd.Timestamp(case.time[0]), pd.Timestamp(case.time[-1])
-    s = case.obs_raw[(case.obs_raw.index >= t0) & (case.obs_raw.index <= t1)]
+    """Sampling statistics, isolated spikes and persistent steps in the surveys used.
+
+    The surveys used are those inside the grid plus the enclosing survey on
+    each side (they set the first and last grid values).
+    """
+    s = case.obs_raw.loc[duck.needed_days(case.obs_raw.index, case.time[0], case.time[-1])]
     x, t = s.to_numpy(), s.index
     dd = np.diff(t.to_numpy()).astype("timedelta64[s]").astype(float) / 86400.0
     spacing = pd.Series(dd, index=t[1:])
@@ -153,9 +162,15 @@ def survey_checks(case: duck.DuckCase, max_gap_days: float) -> dict:
         before, after = x[max(0, i - 5):i], x[i:i + 5]
         if after.size >= 3 and abs(np.median(after) - np.median(before)) > 0.75 * JUMP_M:
             steps.append((t[i - 1].date(), t[i].date(), float(np.median(after) - np.median(before))))
+    edge_gaps = []  # a long gap right at the start or end of the record
+    if dd.size and dd[0] > max_gap_days:
+        edge_gaps.append(("start", t[0].date(), t[1].date(), float(dd[0])))
+    if dd.size > 1 and dd[-1] > max_gap_days:
+        edge_gaps.append(("end", t[-2].date(), t[-1].date(), float(dd[-1])))
     return dict(n=int(x.size), median_spacing=float(np.median(dd)), n_long_gaps=int((dd > max_gap_days).sum()),
                 longest_gap=float(dd.max()), spikes=spikes, steps=steps, first=t[0].date(), last=t[-1].date(),
-                block_min=float(blocks.min()), block_max=float(blocks.max()), sparsest=int(blocks.idxmax()))
+                block_min=float(blocks.min()), block_max=float(blocks.max()), sparsest=int(blocks.idxmax()),
+                edge_gaps=edge_gaps)
 
 
 def duplicate_models(case: duck.DuckCase, order: list[str], r_min: float = 0.99) -> tuple[list, list]:
@@ -241,7 +256,7 @@ def fig_observations(cases: dict, args, out: Path) -> Path:
         cf = sp.plot_power(wo, time=case.time, ax=ax_map, alpha=wv.ar1(case.obs), period_scale=1 / YEAR,
                            period_ticks=PERIOD_TICKS, period_label="Period", colorbar=False,
                            period_lim=MAP_PERIODS,
-                           title="Observed wavelet power (black contour: pointwise 95 % vs red noise; "
+                           title="Observed wavelet power (black contour: nominal 95 % level, AR(1) red noise; "
                                  "pale: cone of influence and survey gaps)")
         ax_map.set_xlim(mpl_dates(t[0]), mpl_dates(t[-1]))
         sp.plot_global_power(wo, ax=ax_gws, alpha=wv.ar1(case.obs), period_scale=1 / YEAR,
@@ -303,20 +318,28 @@ def fig_spectral_ratio(cases: dict, colors: dict, args, out: Path) -> Path:
     return save(fig, out / "fig2_variance_ratio_by_period.png", args)
 
 
-def band_labels(skill_p: pd.DataFrame) -> list[str]:
+SUPPORT = {"time": ("valid_frac", "of time"), "cells": ("valid_cell_frac", "of cells")}
+
+
+def band_labels(skill_p: pd.DataFrame, support: str = "time") -> list[str]:
+    """Band names with the support of the metric shown: share of the time steps at
+    which the whole band is usable (NSE, amplitude) or of the usable time-period
+    cells (coherence, phase)."""
+    col, text = SUPPORT[support]
     first = skill_p.drop_duplicates("band").set_index("band")
     labels = []
     for b in BANDS:
-        if b not in first.index or not np.isfinite(first.loc[b, "valid_frac"]):
+        if b not in first.index or not np.isfinite(first.loc[b, col]):
             labels.append(b)
             continue
         star = "*" if first.loc[b, "exploratory"] else ""
-        labels.append(f"{b}\n{first.loc[b, 'valid_frac']:.0%} usable{star}")
+        labels.append(f"{b}\n{first.loc[b, col]:.0%} {text}{star}")
     return labels
 
 
 def fig_band_heatmap(skill: pd.DataFrame, cases: dict, colors: dict, metric: str, args, out: Path,
-                     name: str, title: str, fmt="{:.2f}", text_metric: str | None = None) -> Path:
+                     name: str, title: str, fmt="{:.2f}", text_metric: str | None = None,
+                     support: str = "time") -> Path:
     n_rows = max(len(c["order"]) for c in cases.values())
     fig, axes = _panels(len(cases), n_rows, 7.0)
     for ax, (p, c) in zip(axes, cases.items()):
@@ -324,7 +347,7 @@ def fig_band_heatmap(skill: pd.DataFrame, cases: dict, colors: dict, metric: str
         row_colors = {m: colors[f] for m, f in zip(c["meta"]["model"], c["meta"]["family"])}
         sp.plot_skill_heatmap(df, metric, ax=ax, models=c["order"], bands=list(BANDS), fmt=fmt,
                               text_metric=text_metric, row_colors=row_colors,
-                              band_labels=band_labels(df), colorbar=ax is axes[-1],
+                              band_labels=band_labels(df, support), colorbar=ax is axes[-1],
                               title=PROFILE_NAME.get(p, p))
     footnote = EXPLORATORY_NOTE if skill["exploratory"].any() else None
     _finish_panels(fig, colors, title, footnote)
@@ -373,7 +396,7 @@ def fig_coherence_atlas(p: str, c: dict, colors: dict, args, out: Path) -> Path:
     for ax in axes.flat[len(order):]:
         ax.set_visible(False)
     fig.suptitle(f"{PROFILE_NAME.get(p, p)}: wavelet coherence with the FRF surveys "
-                 "(black contour: pointwise 95 % significance; pale: cone of influence and survey gaps)",
+                 "(black contour: nominal 95 % level; pale: cone of influence and survey gaps)",
                  x=0.01, ha="left", fontsize=12, color=sp.INK)
     if mappable is not None:
         cax = fig.add_axes((0.36, 0.3 / height, 0.3, 0.1 / height))
@@ -487,33 +510,65 @@ def _md_table(df: pd.DataFrame, p: str, key: str, names: list[str], col: str, fm
     return rows
 
 
+_DATED = re.compile(r"^(starts|ends) (\d{4}-\d{2}-\d{2}), (.+)$")  # coverage reasons with a date
+
+
+def left_out_lines(skipped: dict[str, str], aside: dict[str, str], p: str) -> list[str]:
+    """Runs left out at one profile; those that start too late (or end too early) share one line."""
+    groups, lines = {}, []
+    for m, why in sorted(skipped.items(), key=lambda kv: kv[0].lower()):
+        if aside.pop(f"{m} at profile {p}", None):
+            lines.append(f"  * {m}: {why}; left out before the window was chosen.")
+            continue
+        hit = _DATED.match(why)
+        if hit:
+            groups.setdefault((hit[1], hit[3]), []).append((hit[2], m))
+        else:
+            lines.append(f"  * {m}: {why}.")
+    grouped = []
+    for (verb, rest), items in groups.items():
+        runs = ", ".join(f"{m} ({d})" for d, m in sorted(items))
+        many = len(items) > 1
+        grouped.append(f"  * {len(items)} {'runs' if many else 'run'} {verb[:-1] if many else verb} {rest}: {runs}.")
+    return grouped + lines
+
+
 def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, cases: dict, args,
                   window: dict, out: Path, figures: list[Path], teams_without: list[str]) -> Path:
     c0 = next(iter(cases.values()))
-    w0, w1 = pd.Timestamp(c0["case"].time[0]).date(), pd.Timestamp(c0["case"].time[-1]).date()
-    n_models = len(c0["order"])
+    g0, g1 = (pd.Timestamp(c0["case"].time[i]).date() for i in (0, -1))
     chk_all = [c["checks"] for c in cases.values()]
     lines = ["# Duck single-profile hindcasts (1980-2023 submissions) vs FRF surveys: wavelet comparison", ""]
     if args.note:
         lines += [f"> {args.note}", ""]
-    by_hand = {"--start", "--end"}
-    auto = not ({window["start_set_by"], window["end_set_by"]} & by_hand)
-    start_by = "set by hand" if window["start_set_by"] in by_hand else f"set by {window['start_set_by']}"
-    end_by = "set by hand" if window["end_set_by"] in by_hand else f"set by {window['end_set_by']}"
-    lines += [f"* Window {w0} to {w1}"
-              + (": the longest stretch covered by the surveys and by every model" if auto else "")
-              + f" (start {start_by}; end {end_by}). Weekly grid; survey gaps longer than "
+
+    def _by(text):
+        return text if text == "set by hand" else f"set by {text}"
+
+    if window["mode"] == "surveys":
+        what = ": the whole survey record shared by the profiles"
+    else:
+        what = ": the longest stretch covered by the surveys and by every run that can take part"
+    if "set by hand" in (window["start_set_by"], window["end_set_by"]):
+        what = ""
+    lines += [f"* Window {window['start']} to {window['end']}{what} (start {_by(window['start_set_by'])}; end "
+              f"{_by(window['end_set_by'])}). Weekly grid from {g0} to {g1}; survey gaps longer than "
               f"{days(args.max_gap)} are masked.",
-              f"* {n_models} model runs from {c0['meta']['team'].nunique()} teams. Model families are provisional "
-              "(edit `config/duck_models.csv`).",
+              "* Runs taking part: " + "; ".join(f"profile {p}: {len(c['order'])} runs from "
+                                                 f"{c['meta']['team'].nunique()} teams"
+                                                 for p, c in cases.items())
+              + " (see Runs below). Model families are provisional (edit `config/duck_models.csv`).",
               "* Models were read on the survey days and interpolated like the surveys, so both carry the same "
               "sampling filter." if args.sampling == "surveys" else
               f"* Models were averaged over {args.step} (centred) and compared with the interpolated surveys.",
               "* Every series is compared as an anomaly (mean removed, trend kept), so fixed offsets between "
               "submissions do not matter; units, sign convention and shoreline definition still have to agree.",
-              "* **Usable** = share of the window in which the whole band lies outside the cone of influence and "
-              "the survey gaps; NSE, amplitude and correlation use only those times. Coherence uses every "
-              "trustworthy time-period cell (`valid_cell_frac` in the table), so its support is wider.",
+              "* **Support.** NSE, amplitude and correlation use the times at which the whole band lies outside "
+              "the cone of influence and the survey gaps ('% of time', `valid_frac`). Coherence and phase use "
+              "every trustworthy time-period cell ('% of cells', `valid_cell_frac`), so their support is wider. "
+              "Each figure shows the support of its own metric.",
+              "* **Significance** thresholds are nominal: AR(1) red-noise surrogates on the regular grid, not yet "
+              "checked against the survey sampling (see Caveats).",
               f"* Bands with fewer than {MIN_CYCLES:.0f} usable cycles are marked \\* and treated as exploratory: "
               "shown, not ranked.",
               "* Monthly = month-to-month changes (1.5-4 months) that the surveys can see; not single storms.", ""]
@@ -526,8 +581,8 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
               "resolved variance (only trustworthy cells count).",
               "2. `fig2_variance_ratio_by_period`: model / observed variance at each period "
               "(red = too much, blue = too little).",
-              "3. `fig3_coherence_by_band`: share of each band where model and surveys are coherent above the "
-              "pointwise 95 % red-noise level (co-variation regardless of amplitude).",
+              "3. `fig3_coherence_by_band`: share of each band's cells where model and surveys are coherent above "
+              "a nominal 95 % threshold (co-variation regardless of amplitude).",
               "4. `fig4_amplitude_by_band`: model / observed standard deviation of the band signal.",
               "5. `fig5_nse_by_band`: Nash-Sutcliffe efficiency of the band signal (1 = perfect, "
               "0 = no better than the mean).",
@@ -537,17 +592,33 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
               "8. `fig8_power_atlas_profile*`: each model's own wavelet power in m², on the same colour "
               "scale as the surveys (first panel).", ""]
 
+    lines += ["## Runs", "",
+              "A run takes part when it has a value on every survey day the grid uses: the surveys in the window "
+              "and the one just outside each end.", ""]
+    aside = dict(window.get("set_aside", {}))
+    later = any(_DATED.match(why) for c in cases.values() for why in c["case"].skipped.values())
+    for p, c in cases.items():
+        lines.append(f"* Profile {p}: {len(c['order'])} runs from {c['meta']['team'].nunique()} teams take part.")
+        lines += left_out_lines(c["case"].skipped, aside, p)
+    for key, why in aside.items():  # normally empty: a run set aside also fails in the final window
+        lines.append(f"* Set aside while choosing the common window: {key} ({why}).")
+    if later and window["mode"] == "surveys":
+        lines += ["", "Runs that do not cover the whole record are compared with the others over a shorter common "
+                  "window: `python scripts/duck_wavelets.py --window common --out outputs/duck_1980-2023_common`."]
+    lines += ["", "`models.csv` lists every run with its coverage and status.", ""]
+
     lines += ["## Results by band", ""]
     for p, c in cases.items():
         df = skill[skill["profile"] == p]
         lines += [f"### {PROFILE_NAME.get(p, p)}", "",
-                  "| Band | share of obs. variance | usable (dates, cycles) | best NSE | "
+                  "| Band | share of obs. variance | usable: % of time / % of cells (dates, cycles) | best NSE | "
                   "largest coherent share |", "|---|---|---|---|---|"]
         for band in BANDS:
             b = df[df["band"] == band]
             r0 = b.iloc[0]
-            support = (f"{r0['valid_frac']:.0%} ({month(r0['valid_start'])} to {month(r0['valid_end'])}, "
-                       f"{cycles(r0['n_cycles'])} cycles)" if np.isfinite(r0["n_cycles"]) else "–")
+            support = (f"{r0['valid_frac']:.0%} / {r0['valid_cell_frac']:.0%} ({month(r0['valid_start'])} to "
+                       f"{month(r0['valid_end'])}, {cycles(r0['n_cycles'])} cycles)"
+                       if np.isfinite(r0["n_cycles"]) else "–")
             share = f"{r0['var_frac_obs']:.0%}" if np.isfinite(r0["var_frac_obs"]) else "–"
             if r0["exploratory"]:
                 nse = coh = "exploratory: not ranked"
@@ -587,11 +658,14 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
 
     lines += ["## Data checks", ""]
     for p, c in cases.items():
-        chk, case = c["checks"], c["case"]
-        lines.append(f"* Profile {p}: {chk['n']} surveys in the window ({chk['first']} to {chk['last']}), "
+        chk = c["checks"]
+        lines.append(f"* Profile {p}: {chk['n']} surveys used ({chk['first']} to {chk['last']}), "
                      f"median spacing {chk['median_spacing']:.0f} days (5-year medians {chk['block_min']:.0f}-"
                      f"{chk['block_max']:.0f} days, sparsest from {chk['sparsest']}), {chk['n_long_gaps']} gaps "
                      f"longer than {days(args.max_gap)} (longest {chk['longest_gap']:.0f} days).")
+        for where, d0, d1, gap in chk["edge_gaps"]:
+            lines.append(f"  * The record {'starts' if where == 'start' else 'ends'} with a {gap:.0f}-day gap "
+                         f"(surveys of {d0} and {d1}), so the {where} of the grid is masked.")
         for d, v in chk["spikes"]:
             lines.append(f"  * Isolated survey {v:+.0f} m off its neighbours on {d} (possible outlier; kept).")
         for d0, d1, v in chk["steps"]:
@@ -617,8 +691,6 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
             elif np.isfinite(r0["var_frac_obs"]) and r0["var_frac_obs"] < 0.05 and worst.get(b, 0) < -3:
                 lines.append(f"  * {one_line(b)}: little observed variance ({r0['var_frac_obs']:.0%}), so small "
                              "errors give large negative NSE.")
-        if case.skipped:
-            lines.append("  * Skipped: " + "; ".join(f"{k} ({v})" for k, v in case.skipped.items()))
         same, close = c["dups"]
         for a, b in same:
             lines.append(f"  * {a} and {b} are identical in this window (counted twice in the figures).")
@@ -632,13 +704,14 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
     lines += ["", "## Caveats and known limitations", "",
               f"* The FRF surveys provided to the teams end on {last_survey}, so every score here is in-sample: "
               "the teams could calibrate on these surveys. The scores show how well each model reproduces "
-              "the record, not blind skill. Models in the 'Equilibrium + DA' family assimilate the surveys.",
+              "the record, not blind skill." + (" Models in the 'Equilibrium + DA' family assimilate the surveys."
+                                               if "Equilibrium + DA" in set(skill["family"]) else ""),
               f"* Resolution: in the sparsest years the surveys are about {sparse:.0f} days apart, so periods "
               f"shorter than about {2 * sparse:.0f} days are not resolved then. The monthly band describes "
               "month-to-month variability that the surveys can see, not single storms.",
               "* Significance: the red-noise surrogates are generated on the regular grid and do not go through "
-              "the survey sampling and interpolation, so the 95 % levels (contours in fig1, fig3, fig7) are "
-              "approximate, especially at short periods.",
+              "the survey sampling and interpolation, so the 95 % levels (contours in fig1 and fig7, thresholds "
+              "in fig3) are nominal, not calibrated, especially at short periods.",
               "* The coherent share (`sig_frac`) is a descriptive area fraction, not a band-level p-value: "
               "significant cells come in patches, so values well above 5 % can still arise by chance.",
               "* Lags are weighted averages over coherent cells; they can hide opposite lags at different times.",
@@ -653,11 +726,83 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
               "* `family_summary.csv`: medians per family, each team counted once",
               "* `team_summary.csv`: medians per team",
               "* `trend_by_model.csv`: linear trend and detrended spread of every model",
+              "* `models.csv`: every run per profile with its coverage, status and the reason if left out",
               "* `variance_ratio_by_period_profile*.csv`: model / observed variance per period (years)",
-              "* `run_info.json`: settings of this run", ""]
+              "* `run_info.json`: settings, window, runs per profile, code version, software versions and "
+              "SHA-256 of every input file", ""]
     path = out / "README.md"
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+# --- run record --------------------------------------------------------------------------------
+
+def models_table(subs: pd.DataFrame, cases: dict, profiles) -> pd.DataFrame:
+    """Every run per profile: coverage, status and the reason if it was left out."""
+    cov = duck.coverage(subs, profiles).set_index(["model", "profile"])
+    rows = []
+    for p, c in cases.items():
+        included = set(c["order"])
+        for r in subs.itertuples():
+            first = last = pd.NaT
+            if (r.model, str(p)) in cov.index:
+                first, last = cov.loc[(r.model, str(p)), ["first", "last"]]
+            rows.append(dict(profile=p, model=r.model, team=r.team, family=r.family, file=r.file,
+                             first_day=first, last_day=last,
+                             status="included" if r.model in included else "not included",
+                             reason="" if r.model in included else c["case"].skipped.get(r.model, "")))
+    return pd.DataFrame(rows)
+
+
+def profile_record(c: dict) -> dict:
+    case = c["case"]
+    t = pd.DatetimeIndex(case.time)
+    return dict(grid_start=str(t[0].date()), grid_end=str(t[-1].date()), n_grid=int(t.size),
+                n_gap_points=int(case.gap.sum()), n_runs=len(c["order"]), n_teams=int(c["meta"]["team"].nunique()),
+                runs=c["order"], not_included=case.skipped)
+
+
+def code_version() -> dict:
+    """Git commit of the repository and whether it has uncommitted changes."""
+    def _git(*cmd):
+        try:
+            return subprocess.run(["git", "-C", str(ROOT), *cmd], capture_output=True, text=True,
+                                  timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    commit = _git("rev-parse", "HEAD")
+    status = _git("status", "--porcelain", "--untracked-files=no")
+    from shoreshop3 import __version__
+    return dict(package=__version__, git_commit=commit or "unknown",
+                git_uncommitted_changes=bool(status) if commit else None)
+
+
+def software_versions() -> dict:
+    import matplotlib as mpl
+    import scipy
+
+    return dict(python=platform.python_version(), numpy=np.__version__, scipy=scipy.__version__,
+                pandas=pd.__version__, matplotlib=mpl.__version__)
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def input_digests(raw: Path, subs: pd.DataFrame) -> dict:
+    """SHA-256 of the survey archive and of every submission read."""
+    raw = Path(raw)
+    frf = raw / duck.FRF_ZIP
+    out = dict(frf_profiles=dict(path=str(duck.FRF_ZIP), bytes=frf.stat().st_size, sha256=_sha256(frf))
+               if frf.exists() else "not found as a zip")
+    out["submissions"] = [dict(path=str(Path(r.path).relative_to(raw)) if Path(r.path).is_relative_to(raw)
+                               else Path(r.path).name, bytes=Path(r.path).stat().st_size,
+                               sha256=_sha256(Path(r.path))) for r in subs.itertuples()]
+    return out
 
 
 # --- main ------------------------------------------------------------------------------------------
@@ -666,9 +811,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--raw", type=Path, default=RAW)
     ap.add_argument("--out", type=Path, default=OUTPUTS / "duck_1980-2023")
-    ap.add_argument("--start", default="auto",
-                    help="first day (YYYY-MM-DD), or 'auto': the longest window every model covers")
-    ap.add_argument("--end", default="auto", help="last day, or 'auto' (see --start)")
+    ap.add_argument("--window", choices=duck.WINDOW_MODES, default="surveys",
+                    help="surveys: the whole survey record, runs that do not cover it are left out (default); "
+                         "common: the longest window covered by every run that can take part")
+    ap.add_argument("--start", default=None, help="fix the first day by hand (YYYY-MM-DD)")
+    ap.add_argument("--end", default=None, help="fix the last day by hand (YYYY-MM-DD)")
     ap.add_argument("--step", default="7D")
     ap.add_argument("--max-gap", default="60D")
     ap.add_argument("--sampling", choices=duck.SAMPLING, default="surveys",
@@ -693,14 +840,18 @@ def main() -> None:
     if subs.empty:
         sys.exit(f"No mipDuck_1980-2023*.csv under {args.raw}: download the Duck files first")
     print(f"{len(subs)} submissions from {subs['team'].nunique()} teams")
-    colors = family_colors(subs["family"])
+    colors = family_colors(subs["family"])  # from every submission, so colours match between runs
     teams_without = sorted(set(duck.team_folders(args.raw)) - set(subs["folder"]), key=str.lower)
     max_gap_days = pd.Timedelta(args.max_gap) / pd.Timedelta("1D")
-    start, end, window = duck.common_window(args.raw, args.profiles, subs,
-                                            start=None if args.start == "auto" else args.start,
-                                            end=None if args.end == "auto" else args.end)
-    start_s, end_s = str(start.date()), str(end.date())
-    print(f"window {start_s} to {end_s} (start: {window['start_set_by']}; end: {window['end_set_by']})")
+    w = duck.choose_window(args.raw, args.profiles, subs, mode=args.window,
+                           start=None if args.start in (None, "auto") else args.start,
+                           end=None if args.end in (None, "auto") else args.end)
+    start_s, end_s = str(w.start.date()), str(w.end.date())
+    window = dict(start=start_s, end=end_s, mode=w.mode, start_set_by=w.start_set_by, end_set_by=w.end_set_by,
+                  set_aside=w.set_aside)
+    print(f"window ({w.mode}) {start_s} to {end_s} (start: {w.start_set_by}; end: {w.end_set_by})")
+    for key, why in w.set_aside.items():
+        print(f"  set aside before choosing the window: {key}: {why}")
 
     cases, skills = {}, []
     for p in args.profiles:
@@ -710,8 +861,10 @@ def main() -> None:
         aligned = pd.DataFrame({"obs": case.obs, "obs_gap": case.gap, **case.models},
                                index=pd.DatetimeIndex(case.time, name="time"))
         aligned.to_csv(PROCESSED / f"duck_profile{p}_{start_s}_{end_s}_{args.step}_{args.sampling}.csv")
-        print(f"profile {p}: {len(order)} models, {case.obs.size} grid points, "
-              f"{int(case.gap.sum())} in survey gaps; skipped: {case.skipped or 'none'}")
+        print(f"profile {p}: {len(order)} runs, {case.obs.size} grid points, "
+              f"{int(case.gap.sum())} in survey gaps; not included: {len(case.skipped)}")
+        for m, why in case.skipped.items():
+            print(f"  - {m}: {why}")
 
         skill = wv.compare_models(case.obs, {m: case.models[m] for m in order}, case.dt_days, BANDS,
                                   invalid_obs=case.gap, n_surrogates=args.n_surrogates,
@@ -750,6 +903,8 @@ def main() -> None:
                         dups=duplicate_models(case, order), trend=trends(case, order, case.meta))
         print(f"  analysed in {time.time() - t_start:.0f} s")
 
+    present = set().union(*(set(c["meta"]["family"]) for c in cases.values()))
+    colors = {f: col for f, col in colors.items() if f in present}  # legend: families taking part only
     skill_all = pd.concat(skills, ignore_index=True)
     fam, team = group_tables(skill_all)
     skill_all.assign(band=skill_all["band"].map(one_line)).to_csv(out / "skill_by_band.csv", index=False)
@@ -757,13 +912,15 @@ def main() -> None:
     team.assign(band=team["band"].map(one_line)).to_csv(out / "team_summary.csv", index=False)
     pd.concat([c["trend"] for c in cases.values()], ignore_index=True).to_csv(
         out / "trend_by_model.csv", index=False, float_format="%.4g")
+    models_table(subs, cases, args.profiles).to_csv(out / "models.csv", index=False)
 
     figures = [
         fig_observations(cases, args, out),
         fig_spectral_ratio(cases, colors, args, out),
         fig_band_heatmap(skill_all, cases, colors, "sig_frac", args, out, "fig3_coherence_by_band.png",
-                         "Co-variation: share of each band where model and surveys are coherent above the pointwise "
-                         "95 % red-noise level (about 5 % on average by chance)", fmt="{:.0%}"),
+                         "Co-variation: share of each band's cells where model and surveys are coherent above a "
+                         "nominal 95 % threshold (AR(1) red noise on the regular grid; not yet checked against "
+                         "the survey sampling)", fmt="{:.0%}", support="cells"),
         fig_band_heatmap(skill_all, cases, colors, "std_ratio", args, out, "fig4_amplitude_by_band.png",
                          "Amplitude: model / observed standard deviation of the band signal (1 = right size)"),
         fig_band_heatmap(skill_all, cases, colors, "nse", args, out, "fig5_nse_by_band.png",
@@ -771,7 +928,7 @@ def main() -> None:
                          "0 = no better than the mean)", fmt=fmt_nse),
         fig_band_heatmap(skill_all, cases, colors, "phase_deg", args, out, "fig6_timing_by_band.png",
                          "Timing where coherent: colour = phase, text = lag in days (+ = model late; an average "
-                         "that can hide opposite lags)", fmt="{:.0f} d", text_metric="lag"),
+                         "that can hide opposite lags)", fmt="{:.0f} d", text_metric="lag", support="cells"),
     ]
     figures += [fig_coherence_atlas(p, c, colors, args, out) for p, c in cases.items()]
     figures += [fig_power_atlas(p, c, colors, args, out) for p, c in cases.items()]
@@ -787,11 +944,16 @@ def main() -> None:
         except ValueError:
             return Path(v).name
 
-    info = {k: (_rel(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
-    info.update(window=[start_s, end_s], window_set_by=window, bands_days={one_line(k): v for k, v in BANDS.items()},
-                min_cycles=MIN_CYCLES, n_models=len(cases[args.profiles[0]]["order"]),
+    info = dict(settings={k: (_rel(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+                window=window,
+                profiles={p: profile_record(c) for p, c in cases.items()},
+                bands_days={one_line(k): v for k, v in BANDS.items()}, min_cycles=MIN_CYCLES,
+                significance=dict(method="AR(1) red-noise surrogate pairs on the regular grid (nominal)",
+                                  n_surrogates=args.n_surrogates, seed=0, alpha_decimals=2, level=0.95),
+                code=code_version(), software=software_versions(),
+                inputs=input_digests(args.raw, subs),
                 runtime_s=round(time.time() - t_start), created=time.strftime("%Y-%m-%d %H:%M"))
-    (out / "run_info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
+    (out / "run_info.json").write_text(json.dumps(info, indent=2, default=str), encoding="utf-8")
     print(f"Done in {time.time() - t_start:.0f} s. See {summary}")
 
 

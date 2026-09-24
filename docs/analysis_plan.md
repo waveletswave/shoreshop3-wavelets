@@ -28,7 +28,7 @@ about 970 North Carolina transects).
 | Step | What | Status |
 |---|---|---|
 | 0. Inventory | Mirror the Globus collection; list what each team submitted against `SubmissionTemplates/` | done (`outputs/inventory/`) |
-| 1. Harmonise | Read each team's files into one table per site (model x transect x time), with the same units, sign convention and transect IDs | Duck done (`src/shoreshop3/duck.py`); NC to do |
+| 1. Harmonise | Read each team's files into one table per site (model x transect x time), with the same units, sign convention and transect IDs | Duck: files read onto one grid (`src/shoreshop3/duck.py`); units, sign convention and shoreline definition not yet checked. NC to do |
 | 2. Sampling | Put observations on a regular grid, flag long gaps, and read each model on the observation days so both series share the same sampling | done for Duck |
 | 3. Time scales | Per transect: wavelet power of observations and models, coherence, and skill per band (`compare_models`) | Duck first pass done |
 | 4. Length scales | The same tools along the coast (`dt` = transect spacing) for the alongshore models | to do |
@@ -43,7 +43,7 @@ about 970 North Carolina transects).
 | Sub-annual | 4-8 months | |
 | Annual | 8-18 months | the seasonal cycle |
 | Interannual | 1.5-4 years | |
-| Multi-year | 4-8 years | About one to two usable cycles in a 30-year record: exploratory, not ranked. |
+| Multi-year | 4-8 years | 2.6-2.7 usable cycles over the whole record (1.3 over 1988-2019): exploratory, not ranked. |
 | Trend | the whole window | linear slope, compared directly rather than with wavelets |
 
 A band is a range of time scales, not a process. Links to processes (storm
@@ -60,7 +60,8 @@ Alongshore bands (placeholder): below 0.5 km, 0.5-5 km, above 5 km.
   where the whole band is trustworthy (`valid_frac`, `valid_start` to `valid_end`, `n_cycles`).
 * `mean_rsq`, `sig_frac`: wavelet coherence, i.e. co-variation regardless of
   amplitude, over every trustworthy cell (`valid_cell_frac`). `sig_frac` is a
-  descriptive share of the band, not a band-level test.
+  descriptive share of the band, not a band-level test, and its 95 % threshold
+  is nominal (AR(1) surrogates on the regular grid).
 * `phase_deg`, `lag`: timing where the series are coherent; positive = model lags.
 * `var_frac_obs`: the band's share of the observed variance, counting only
   trustworthy cells.
@@ -73,6 +74,16 @@ Alongshore bands (placeholder): below 0.5 km, 0.5-5 km, above 5 km.
   automatically; constant models no longer stop the run; each band reports its
   support (dates, cycles); bands with fewer than three usable cycles are not
   ranked; family medians count each team once; figures in PNG and PDF.
+* 2026-09-24: the main analysis uses the whole survey record (October 1980 to
+  December 2019); runs that start later are left out of it and compared with
+  the others over a common window (`--window common`). That window is chosen
+  after setting aside runs with missing values inside it, so they do not
+  shorten it. A constant model is masked with its own gap flags. Each figure
+  shows the support of its own metric (% of time for NSE and amplitude, % of
+  cells for coherence and timing), significance levels are called nominal,
+  and each analysis records which runs took part and which
+  were left out (with reasons), the grid, the code version and checksums of the
+  input files (`models.csv`, `run_info.json`).
 
 ## Known limitations and next steps
 
@@ -100,10 +111,14 @@ Alongshore bands (placeholder): below 0.5 km, 0.5-5 km, above 5 km.
 
 ## Open questions
 
-1. Are the 2020-2023 observations held back for a blind test? The FRF surveys
+1. Which window for the main Duck analysis? The whole survey record (from
+   October 1980) keeps 15 of the 33 runs (7 of the 10 teams). Starting in late
+   June 1984 keeps 32 runs at profile 1 and 30 at profile 1006, from all 10
+   teams, and shortens the record by about four years.
+2. Are the 2020-2023 observations held back for a blind test? The FRF surveys
    in `InputData/` end on 2019-12-06 and the CoastSat file is labelled
    "Pre-2020".
-2. Which periods did each team calibrate on, and which runs assimilate data?
-3. Are models expected to include nourishments (a nourishment list is in `InputData/`)?
-4. Which model groupings make sense (the families in `config/duck_models.csv` are provisional)?
-5. Beyond shoreline position, are other variables (dune, berm, barrier width) to be compared?
+3. Which periods did each team calibrate on, and which runs assimilate data?
+4. Are models expected to include nourishments (a nourishment list is in `InputData/`)?
+5. Which model groupings make sense (the families in `config/duck_models.csv` are provisional)?
+6. Beyond shoreline position, are other variables (dune, berm, barrier width) to be compared?

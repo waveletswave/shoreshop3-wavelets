@@ -94,27 +94,39 @@ Needs `InputData/hindcast_1980_2023/shorelines_and_profiles/FRF_Profiles.zip` an
 the teams' `mipDuck_1980-2023*.csv` files in `data/raw/`.
 
 ```bash
-python scripts/duck_wavelets.py             # figures + tables in outputs/duck_1980-2023/
+python scripts/duck_wavelets.py             # whole survey record -> outputs/duck_1980-2023/
+python scripts/duck_wavelets.py --window common --out outputs/duck_1980-2023_common
 python scripts/duck_wavelets.py --profiles 1006 --end 2017-06-13 --no-maps \
     --out outputs/duck_1980-2023_1006_pre2017 --note "Profile 1006 before the June 2017 step"
 ```
 
-* Surveys at FRF profiles yFRF = 1 and 1006 go on a weekly grid over the
-  longest window that the surveys and every model cover. The window is found
-  automatically and the README of the run names the submission that sets each
-  end; `--start` and `--end` fix it by hand. Gaps longer than 60 days are masked.
+* Surveys at FRF profiles yFRF = 1 and 1006 go on a weekly grid. Gaps longer
+  than 60 days are masked.
+* Window. By default (`--window surveys`) it is the whole survey record,
+  October 1980 to December 2019; runs that do not cover it are left out, with
+  the reason. `--window common` uses the longest window that the surveys and
+  every run that can take part cover: a run with missing values inside the
+  candidate window is set aside and the window is recomputed without it, so it
+  does not shorten the window for the others. `--start` and `--end` fix either
+  end by hand.
 * Models are read on the survey days and interpolated the same way
   (`--sampling surveys`), so both series carry the same sampling filter.
 * Model labels and provisional families: `config/duck_models.csv` (a new
   submission without a row still runs, labelled by its file name).
 * Figures are written as PNG (300 dpi; the two atlases 220 dpi) and PDF
   (`--dpi`, `--no-pdf`); the one-per-model maps in `wtc/` are PNG only.
-* `outputs/duck_1980-2023/README.md` lists the results by band (with the dates
-  and number of cycles behind each score), family and team medians, trends,
-  data checks (outliers, steps, duplicate or constant submissions) and caveats.
-* Coherence significance levels are cached in `data/interim/wtc_sig/`: the
-  first run takes about 5 minutes, later runs about 1 minute (a new window
-  length needs a new cache).
+* `outputs/duck_1980-2023/README.md` lists the runs taken part and left out
+  (with reasons), the results by band (with the support behind each score:
+  % of time for NSE and amplitude, % of cells for coherence and timing, dates
+  and number of cycles), family and team medians, trends, data checks
+  (outliers, steps, duplicate or constant submissions) and caveats.
+* `models.csv` lists every run per profile with its first and last day, whether
+  it took part and why not. `run_info.json` records the settings, the window and
+  what set it, the grid of each profile, the git commit, software versions and
+  the SHA-256 of every input file.
+* Coherence significance levels (nominal: AR(1) surrogates on the regular grid)
+  are cached in `data/interim/wtc_sig/`: the first run takes about 5 minutes,
+  later runs about 2 minutes (a new window length needs a new cache).
 
 ## Wavelet toolkit in 10 lines
 
@@ -131,11 +143,13 @@ sig = wv.coherence_significance(len(reg.values), reg.dt, wv.ar1(reg.values), wv.
 ```
 
 `skill` has one row per model and band. Columns: the support of each score
-(share of the record, first and last usable time, number of cycles), the
+(share of the time steps for the signal scores, share of the time-period cells
+for coherence, first and last usable time, equivalent number of cycles), the
 band's share of the observed variance, amplitude ratio, correlation, RMSE, NSE
-of the band-limited signals, mean coherence, share of the band with significant
-coherence, and phase/lag (positive = model lags observations). A model without
-variability gets amplitude scores and a note instead of stopping the run.
+of the band-limited signals, mean coherence, share of the band with coherence
+above the 95 % level, and phase/lag (positive = model lags observations). A
+model without variability gets amplitude scores and a note instead of stopping
+the run.
 
 Conventions and caveats:
 

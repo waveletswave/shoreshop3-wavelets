@@ -381,7 +381,8 @@ def plot_global_power(res: CWTResult, *, ax=None, alpha: float | None = None, le
     """Global wavelet spectrum on a vertical period axis, to sit beside :func:`plot_power`.
 
     Time-averaged power outside the COI and gaps in physical units (ink), the
-    AR1 ``level`` significance line (dashed) and, per band (limits in the
+    AR1 ``level`` significance line (dashed; nominal: it assumes regular
+    sampling) and, per band (limits in the
     units of ``res.periods``), the band's share of the resolved variance
     (:func:`shoreshop3.wavelets.band_variance_fraction`, same trustworthy cells).
     """
@@ -397,7 +398,7 @@ def plot_global_power(res: CWTResult, *, ax=None, alpha: float | None = None, le
     if alpha is not None:
         thr = global_significance(res, alpha, level, n_used=count) * res.variance
         ax.plot(thr, per, color=INK_2, linewidth=1.0, linestyle=(0, (4, 2)),
-                label=f"{level:.0%} red noise", zorder=2)
+                label=f"{level:.0%} red noise\n(nominal)", zorder=2)
     ax.set_xscale("log")
     shown = np.isfinite(power) & (power > 0)
     if period_lim is not None:

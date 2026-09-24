@@ -67,6 +67,7 @@ __all__ = [
     "compare_models",
     "CONSTANT_NOTE",
     "is_constant",
+    "gap_fraction",
 ]
 
 # --- Morlet constants (Torrence & Compo 1998, Tables 1-2) --------------------
@@ -151,12 +152,7 @@ class CWTResult:
         if self.invalid is None or not self.invalid.any():
             return np.zeros(self.coeffs.shape)
         if self._gap_frac is None:
-            npad = int(2 ** np.ceil(np.log2(2 * self.n)))  # no wrap-around
-            k = 2.0 * np.pi * sfft.rfftfreq(npad)
-            F = np.exp(-0.25 * (self.scales[:, None] / self.dt) ** 2 * k[None, :] ** 2)
-            g = sfft.rfft(self.invalid.astype(float), n=npad)
-            frac = sfft.irfft(F * g[None, :], n=npad, axis=1)[:, : self.n]
-            self._gap_frac = np.clip(frac, 0.0, 1.0)
+            self._gap_frac = gap_fraction(self.invalid, self.scales, self.dt)
         return self._gap_frac
 
     def gap_mask(self) -> np.ndarray:
@@ -168,6 +164,22 @@ class CWTResult:
     def valid_mask(self) -> np.ndarray:
         """Boolean (n_scales, n_times): True outside the COI and not dominated by gaps."""
         return (self.periods[:, None] <= self.coi[None, :]) & ~self.gap_mask()
+
+
+def gap_fraction(invalid: Sequence[bool], scales: np.ndarray, dt: float) -> np.ndarray:
+    """Share of each Morlet wavelet's energy on flagged samples, (n_scales, n_times).
+
+    Needs only the flags and the scales, so it also works for a series that
+    cannot be transformed (e.g. a constant model).
+    """
+    inv = np.asarray(invalid, bool)
+    n = inv.size
+    npad = int(2 ** np.ceil(np.log2(2 * n)))  # no wrap-around
+    k = 2.0 * np.pi * sfft.rfftfreq(npad)
+    F = np.exp(-0.25 * (np.asarray(scales)[:, None] / dt) ** 2 * k[None, :] ** 2)
+    g = sfft.rfft(inv.astype(float), n=npad)
+    frac = sfft.irfft(F * g[None, :], n=npad, axis=1)[:, :n]
+    return np.clip(frac, 0.0, 1.0)
 
 
 def cwt(x: Sequence[float], dt: float, *, dj: float = 1 / 12, s0: float | None = None,
@@ -720,11 +732,14 @@ _is_constant = is_constant
 
 def _band_metrics(wo: CWTResult, wm: CWTResult | None, coh: CoherenceResult | None, name: str,
                   band: tuple[float, float], rsq_sig: np.ndarray | None,
-                  phase_min_rsq: float = 0.5, min_phase_frac: float = 0.1) -> dict:
+                  phase_min_rsq: float = 0.5, min_phase_frac: float = 0.1,
+                  model_bad: np.ndarray | None = None) -> dict:
     """Skill metrics for one band. ``wm``/``coh`` None: a constant model (no variability).
 
     For a constant model the amplitude metrics are well defined (its band signal
     is zero: std_ratio = 0, NSE close to 0) but coherence and phase are not.
+    ``model_bad`` marks the cells its own flagged samples spoil (constant model
+    only; otherwise the model transform carries its flags).
     """
     rows = band_rows(wo, band)
     out = dict(band=name, period_min=band[0], period_max=band[1], n_scales=int(rows.sum()))
@@ -733,12 +748,18 @@ def _band_metrics(wo: CWTResult, wm: CWTResult | None, coh: CoherenceResult | No
     if not rows.any():
         return out
 
-    mask = coh.valid_mask() if coh is not None else wo.valid_mask()  # same cells for obs and model
+    if coh is not None:
+        mask = coh.valid_mask()  # the same cells for obs and model
+    else:
+        mask = wo.valid_mask() if model_bad is None else wo.valid_mask() & ~model_bad
     valid = mask[rows]
     out["valid_cell_frac"] = float(valid.mean())
     total = resolved_variance(wo, mask)
     out["var_frac_obs"] = _ratio(band_variance(wo, band, mask), total)
-    out["var_frac_model"] = 0.0 if wm is None else _ratio(band_variance(wm, band, mask), total)
+    if wm is None:  # a constant model has no variance wherever the band has support
+        out["var_frac_model"] = 0.0 if np.isfinite(out["var_frac_obs"]) else np.nan
+    else:
+        out["var_frac_model"] = _ratio(band_variance(wm, band, mask), total)
 
     # band-limited signals, compared where every scale of the band is trustworthy
     t_ok = valid.all(axis=0)
@@ -783,6 +804,18 @@ def _band_metrics(wo: CWTResult, wm: CWTResult | None, coh: CoherenceResult | No
             out["lag"] = float(np.sum(weight * lags) / weight.sum())
             out["phase_deg"] = float(np.degrees(np.angle(per_scale.sum())))
     return out
+
+
+def _model_bad(invalid, wo: CWTResult) -> np.ndarray | None:
+    """Cells spoilt by a model's own flagged samples, on the observation transform's scales."""
+    if invalid is None:
+        return None
+    inv = np.asarray(invalid, bool)
+    if inv.shape != (wo.n,):
+        raise ValueError("invalid_model must have the same length as the series")
+    if not inv.any():
+        return None
+    return gap_fraction(inv, wo.scales, wo.dt) > wo.max_gap_fraction
 
 
 def band_skill(obs, model, dt: float, bands: Mapping[str, tuple[float, float]], *,
@@ -830,12 +863,14 @@ def band_skill(obs, model, dt: float, bands: Mapping[str, tuple[float, float]], 
     obs, model = _check_pair(obs, model)
     kw = dict(dj=dj, s0=s0, J=J, pad=pad, detrend=detrend)
     wo = cwt(obs, dt, invalid=invalid_obs, **kw)
+    bad = None
     if _is_constant(_anomaly(model, detrend), obs):
         wm = coh = None
+        bad = _model_bad(invalid_model, wo)
     else:
         wm = cwt(model, dt, invalid=invalid_model, **kw)
         coh = _coherence_from(wo, wm)
-    return pd.DataFrame([_band_metrics(wo, wm, coh, k, tuple(v), rsq_sig, phase_min_rsq)
+    return pd.DataFrame([_band_metrics(wo, wm, coh, k, tuple(v), rsq_sig, phase_min_rsq, model_bad=bad)
                          for k, v in bands.items()])
 
 
@@ -864,9 +899,10 @@ def compare_models(obs, models: Mapping[str, Sequence[float]], dt: float,
         if series.shape != obs.shape:
             raise ValueError(f"model {name!r} is not on the observation grid")
         inv = None if invalid_models is None else invalid_models.get(name)
-        sig = None
+        sig = bad = None
         if _is_constant(_anomaly(series, detrend), obs):
             wm = coh = None  # partial scores only; see _band_metrics
+            bad = _model_bad(inv, wo)
         else:
             wm = cwt(series, dt, invalid=inv, **kw)
             coh = _coherence_from(wo, wm)
@@ -876,7 +912,7 @@ def compare_models(obs, models: Mapping[str, Sequence[float]], dt: float,
                                          J=wo.scales.size - 1, pad=pad,
                                          n_surrogates=n_surrogates, seed=seed,
                                          cache_dir=cache_dir, alpha_decimals=alpha_decimals)
-        df = pd.DataFrame([_band_metrics(wo, wm, coh, k, tuple(v), sig, phase_min_rsq)
+        df = pd.DataFrame([_band_metrics(wo, wm, coh, k, tuple(v), sig, phase_min_rsq, model_bad=bad)
                            for k, v in bands.items()])
         df.insert(0, "model", name)
         frames.append(df)

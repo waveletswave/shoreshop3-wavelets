@@ -320,7 +320,7 @@ def build_inventory(raw_root: str | Path, out_dir: str | Path, *, do_peek: bool 
             zip(teams["team"], teams["template_files_found"].fillna(0))]
     teams.to_csv(out / "teams.csv", index=False)
 
-    md = [f"# ShoreShop3 data inventory\n",
+    md = ["# ShoreShop3 data inventory\n",
           f"Source: `{root}` - scanned {datetime.now().isoformat(timespec='minutes')}\n",
           f"{len(files)} files, {files['size_bytes'].sum() / 1e9:.2f} GB in total.\n"]
     if templates:

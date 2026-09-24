@@ -299,3 +299,21 @@ def test_constant_model_gets_partial_scores(rng):
     assert np.isnan(flat["corr"]) and np.isnan(flat["mean_rsq"]) and np.isnan(flat["sig_frac"])
     good = df.set_index("model").loc["good"]
     assert good["note"] == "" and good["nse"] > 0.9
+
+
+def test_constant_model_respects_its_own_invalid_flags():
+    n = 2000
+    x = np.sin(2 * np.pi * np.arange(n) / 64) + 0.1 * np.random.default_rng(0).standard_normal(n)
+    flat = np.full(n, 2.0)
+    none_valid = wv.band_skill(x, flat, 1.0, {"b": (40, 100)}, invalid_model=np.ones(n, bool)).iloc[0]
+    assert none_valid["n_valid"] == 0 and np.isnan(none_valid["nse"])
+    assert np.isnan(none_valid["var_frac_model"])
+    half = np.zeros(n, bool)
+    half[: n // 2] = True
+    part = wv.band_skill(x, flat, 1.0, {"b": (40, 100)}, invalid_model=half).iloc[0]
+    full = wv.band_skill(x, flat, 1.0, {"b": (40, 100)}).iloc[0]
+    assert 0 < part["n_valid"] < full["n_valid"]
+    assert part["valid_first"] > n // 2 - 1  # only the unflagged half counts
+    # the shared helper matches what the transform itself flags
+    res = wv.cwt(x, 1.0, invalid=half)
+    assert np.allclose(wv.gap_fraction(half, res.scales, res.dt), res.gap_fraction())
