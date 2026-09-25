@@ -117,9 +117,10 @@ python scripts/duck_wavelets.py --profiles 1006 --end 2017-06-13 --no-maps \
   (`--dpi`, `--no-pdf`); the one-per-model maps in `wtc/` are PNG only.
 * `outputs/duck_1980-2023/README.md` lists the runs taken part and left out
   (with reasons), the results by band (with the support behind each score:
-  % of time for NSE and amplitude, % of cells for coherence and timing, dates
-  and number of cycles), family and team medians, trends, data checks
-  (outliers, steps, duplicate or constant submissions) and caveats.
+  % of time for NSE and amplitude, % of cells for coherence and timing, and
+  the cycles in all and in the longest continuous stretch), family and team
+  medians, trends, data checks (outliers, steps, duplicate or constant
+  submissions) and caveats.
 * `models.csv` lists every run per profile with its first and last day, whether
   it took part and why not. `run_info.json` records the settings, the window and
   what set it, the grid of each profile, the git commit, software versions and
@@ -144,12 +145,13 @@ sig = wv.coherence_significance(len(reg.values), reg.dt, wv.ar1(reg.values), wv.
 
 `skill` has one row per model and band. Columns: the support of each score
 (share of the time steps for the signal scores, share of the time-period cells
-for coherence, first and last usable time, equivalent number of cycles), the
-band's share of the observed variance, amplitude ratio, correlation, RMSE, NSE
-of the band-limited signals, mean coherence, share of the band with coherence
-above the 95 % level, and phase/lag (positive = model lags observations). A
-model without variability gets amplitude scores and a note instead of stopping
-the run.
+for coherence, first and last usable time, number of cycles in all and in the
+longest continuous stretch), the band's share of the observed variance over the
+same times as the signal scores, amplitude ratio, correlation, RMSE, NSE of the
+band-limited signals, mean coherence, share of the band with coherence above
+the 95 % level, and phase/lag (positive = model lags observations). A model
+without variability gets amplitude scores and a note instead of stopping the
+run.
 
 Conventions and caveats:
 
@@ -160,9 +162,10 @@ Conventions and caveats:
   in the same unit.
 * Results inside the cone of influence (record edges), or where more than 25 %
   of a wavelet's energy falls on long filled gaps, are left out of every
-  statistic, including the variance shares (so a short gap only removes short
-  periods). The coherence mask does not yet include the extra spread from the
-  coherence smoothing.
+  statistic (so a short gap only removes short periods). A band's variance
+  share compares its band signal with the series over the same times. The
+  coherence mask does not yet include the extra spread from the coherence
+  smoothing.
 * Where a series has essentially no variance at some period (e.g. a smooth
   model at short periods), coherence is set towards 0 rather than the unstable 0/0.
 * The AR1 red-noise test is a reference background, not proof of a process;

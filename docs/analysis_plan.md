@@ -43,7 +43,7 @@ about 970 North Carolina transects).
 | Sub-annual | 4-8 months | |
 | Annual | 8-18 months | the seasonal cycle |
 | Interannual | 1.5-4 years | |
-| Multi-year | 4-8 years | 2.6-2.7 usable cycles over the whole record (1.3 over 1988-2019): exploratory, not ranked. |
+| Multi-year | 4-8 years | 2.6-2.7 cycles over the whole record, all in one continuous stretch (1.3 over 1988-2019): exploratory, not ranked. |
 | Trend | the whole window | linear slope, compared directly rather than with wavelets |
 
 A band is a range of time scales, not a process. Links to processes (storm
@@ -57,14 +57,20 @@ Alongshore bands (placeholder): below 0.5 km, 0.5-5 km, above 5 km.
 
 * `std_ratio`: amplitude of the band signal, model / observed (below 1: too damped).
 * `corr`, `rmse`, `nse`: agreement of the band-limited signals, over the times
-  where the whole band is trustworthy (`valid_frac`, `valid_start` to `valid_end`, `n_cycles`).
+  where the whole band is trustworthy (`valid_frac`). These times can come in
+  several stretches between survey gaps: `n_cycles` counts all of them,
+  `longest_*` describes the longest continuous one.
+* A band is ranked only if its longest continuous usable stretch holds at least
+  three cycles; otherwise it is exploratory (shown, not ranked).
 * `mean_rsq`, `sig_frac`: wavelet coherence, i.e. co-variation regardless of
   amplitude, over every trustworthy cell (`valid_cell_frac`). `sig_frac` is a
   descriptive share of the band, not a band-level test, and its 95 % threshold
   is nominal (AR(1) surrogates on the regular grid).
 * `phase_deg`, `lag`: timing where the series are coherent; positive = model lags.
-* `var_frac_obs`: the band's share of the observed variance, counting only
-  trustworthy cells.
+* `var_share_obs`: the band's share of the observed variance: variance of the
+  band signal / variance of the surveys, both over the band's scoring times.
+  Shares of different bands refer to different times and need not add up to
+  1; the linear trend's share is given with the trend.
 
 ## Status
 
@@ -84,6 +90,14 @@ Alongshore bands (placeholder): below 0.5 km, 0.5-5 km, above 5 km.
   and each analysis records which runs took part and which
   were left out (with reasons), the grid, the code version and checksums of the
   input files (`models.csv`, `run_info.json`).
+* 2026-09-24: variance shares compare the band signal with the surveys over the
+  same times. The earlier denominator (the variance resolved at each scale,
+  each over its own times) left out about half of the observed variance:
+  mostly the trend, periods longer than 8 years and, at profile 1006, the
+  June 2017 step. The new shares are therefore smaller (annual band at
+  profile 1: 11 % instead of 21 %). Each band also reports its longest
+  continuous usable stretch, which now decides whether the band is ranked;
+  for Duck this changes no band (the multi-year band stays exploratory).
 
 ## Known limitations and next steps
 

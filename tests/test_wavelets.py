@@ -53,7 +53,7 @@ def test_full_reconstruction_and_variance(rng):
     assert 0.9 < total < 1.05
     # over trustworthy cells only, some long scales have no support: the full range is NaN
     assert np.isnan(wv.band_variance(res, (0, np.inf)))
-    assert wv.band_variance_fraction(res, (40, 90)) > 0.5  # the 60-day sine dominates the resolved variance
+    assert wv.band_variance_share(res, x, (40, 90)) > 0.5  # the 60-day sine carries most of the variance
 
 
 def test_band_reconstruction_separates_components():
@@ -199,7 +199,7 @@ def test_band_skill_identifies_strengths(rng):
     assert b.loc["event", "nse"] > 0.8
     assert b.loc["seasonal", "lag"] == pytest.approx(30, abs=4)  # model lags
     assert b.loc["seasonal", "phase_deg"] > 0
-    assert a.loc["seasonal", "var_frac_obs"] > a.loc["event", "var_frac_obs"]
+    assert a.loc["seasonal", "var_share_obs"] > a.loc["event", "var_share_obs"]
 
 
 def test_band_skill_nan_when_band_outside_record():
@@ -262,18 +262,19 @@ def test_band_variance_ignores_gaps_and_needs_support(rng):
     x_bad = x.copy()
     x_bad[gap] = 5.0 * rng.standard_normal(gap.sum())  # wild "filled" values inside the gap
     band = (40, 100)
-    clean = wv.band_variance_fraction(wv.cwt(x, 1.0), band)
+    clean = wv.band_variance_share(wv.cwt(x, 1.0), x, band)
     # strict mask so that no coefficient touches the gap (the default tolerates 25 % of the energy)
     res_bad = wv.cwt(x_bad, 1.0, invalid=gap, max_gap_fraction=1e-3)
-    masked = wv.band_variance_fraction(res_bad, band)
-    whole = wv.band_variance_fraction(res_bad, band, mask="all")
-    assert masked == pytest.approx(clean, abs=0.05)  # masked cells do not enter the share
-    assert whole < clean - 0.2  # counting every cell lets the filled values dominate
+    masked = wv.band_variance_share(res_bad, x_bad, band)
+    whole = wv.band_variance_share(res_bad, x_bad, band, mask="all")
+    assert masked == pytest.approx(clean, abs=0.05)  # masked times enter neither part of the share
+    assert whole < clean - 0.2  # counting every time lets the filled values dominate
     # no trustworthy time at all: every support-dependent metric is undefined
     df = wv.band_skill(x, x, 1.0, {"b": band}, invalid_obs=np.ones(n, bool))
     row = df.iloc[0]
     assert row["valid_frac"] == 0 and row["n_valid"] == 0 and row["valid_first"] == -1
-    assert np.isnan(row["var_frac_obs"]) and np.isnan(row["nse"]) and np.isnan(row["n_cycles"])
+    assert np.isnan(row["var_share_obs"]) and np.isnan(row["nse"]) and np.isnan(row["n_cycles"])
+    assert row["n_segments"] == 0 and row["longest_first"] == -1 and np.isnan(row["longest_cycles"])
 
 
 def test_support_columns_and_cycles(rng):
@@ -285,6 +286,10 @@ def test_support_columns_and_cycles(rng):
     assert row["valid_duration"] == pytest.approx(row["n_valid"] * 2.0)
     assert row["n_cycles"] == pytest.approx(row["valid_duration"] / np.sqrt(150 * 250))
     assert 0 < row["valid_frac"] <= row["valid_cell_frac"] <= 1
+    # no gaps: the usable steps form one stretch, the longest is the whole support
+    assert row["n_segments"] == 1
+    assert (row["longest_first"], row["longest_last"]) == (row["valid_first"], row["valid_last"])
+    assert row["longest_cycles"] == pytest.approx(row["n_cycles"])
 
 
 def test_constant_model_gets_partial_scores(rng):
@@ -294,7 +299,7 @@ def test_constant_model_gets_partial_scores(rng):
                            1.0, {"b": (30, 80)}, n_surrogates=5)
     flat = df.set_index("model").loc["flat"]
     assert flat["note"] == wv.CONSTANT_NOTE
-    assert flat["std_ratio"] == 0 and flat["var_frac_model"] == 0
+    assert flat["std_ratio"] == 0 and flat["var_share_model"] == 0
     assert -0.05 < flat["nse"] <= 0  # a zero band signal is no better than the mean
     assert np.isnan(flat["corr"]) and np.isnan(flat["mean_rsq"]) and np.isnan(flat["sig_frac"])
     good = df.set_index("model").loc["good"]
@@ -307,7 +312,7 @@ def test_constant_model_respects_its_own_invalid_flags():
     flat = np.full(n, 2.0)
     none_valid = wv.band_skill(x, flat, 1.0, {"b": (40, 100)}, invalid_model=np.ones(n, bool)).iloc[0]
     assert none_valid["n_valid"] == 0 and np.isnan(none_valid["nse"])
-    assert np.isnan(none_valid["var_frac_model"])
+    assert np.isnan(none_valid["var_share_model"])
     half = np.zeros(n, bool)
     half[: n // 2] = True
     part = wv.band_skill(x, flat, 1.0, {"b": (40, 100)}, invalid_model=half).iloc[0]
@@ -317,3 +322,39 @@ def test_constant_model_respects_its_own_invalid_flags():
     # the shared helper matches what the transform itself flags
     res = wv.cwt(x, 1.0, invalid=half)
     assert np.allclose(wv.gap_fraction(half, res.scales, res.dt), res.gap_fraction())
+
+
+def test_variance_share_is_not_moved_by_variance_where_the_band_cannot_be_evaluated(rng):
+    n = 4000
+    t = np.arange(n)
+    slow, fast = 3.0 * np.sin(2 * np.pi * t / 200.0), np.sin(2 * np.pi * t / 10.0)
+    base = slow + fast + 0.3 * rng.standard_normal(n)
+    burst = np.where(t < 400, 4.0 * np.sin(2 * np.pi * t / 10.0), 0.0)  # short-period burst near the start
+    long_band, short_band = (100.0, 400.0), (5.0, 20.0)
+    r0, r1 = wv.cwt(base, 1.0), wv.cwt(base + burst, 1.0)
+    support = wv.band_support(r0, long_band)
+    assert not support[:400].any()  # the long band cannot be evaluated during the burst
+    before = wv.band_variance_share(r0, base, long_band)
+    after = wv.band_variance_share(r1, base + burst, long_band)
+    assert after == pytest.approx(before, rel=0.01)  # the burst enters neither numerator nor denominator
+    assert before == pytest.approx(slow[support].var() / base[support].var(), rel=0.02)  # the true share
+    # the short band sees the burst in both parts, and its share rises
+    assert wv.band_variance_share(r1, base + burst, short_band) > wv.band_variance_share(r0, base, short_band) + 0.1
+
+
+def test_longest_stretch_between_gaps(rng):
+    n = 3000
+    x = np.sin(2 * np.pi * np.arange(n) / 25) + 0.2 * rng.standard_normal(n)  # period 50 with dt = 2
+    gaps = np.zeros(n, bool)
+    for a in (700, 1500, 2300):
+        gaps[a:a + 40] = True
+    band = (30.0, 80.0)
+    row = wv.band_skill(x, x, 2.0, {"b": band}, invalid_obs=gaps).iloc[0]
+    assert row["n_segments"] == 4
+    support = wv.band_support(wv.cwt(x, 2.0, invalid=gaps), band)
+    stretch = support[int(row["longest_first"]):int(row["longest_last"]) + 1]
+    assert stretch.all() and stretch.size * 2.0 == pytest.approx(row["longest_duration"])
+    edges = (int(row["longest_first"]) - 1, int(row["longest_last"]) + 1)
+    assert not any(support[i] for i in edges if 0 <= i < n)  # it cannot be extended
+    assert row["longest_duration"] < row["valid_duration"]
+    assert row["longest_cycles"] == pytest.approx(row["longest_duration"] / np.sqrt(30 * 80))

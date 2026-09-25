@@ -105,9 +105,13 @@ def test_spectral_ratio_and_global_power_panels(tmp_path):
     sp.plot_spectral_ratio(per, ratios, ax=axes[0], unresolved_below=8.0, row_colors={"m1": sp.CATEGORICAL[0]})
     assert any("not resolved" in t.get_text() for t in axes[0].texts)
     bands = {"short": (8.0, 32.0), "long": (32.0, 128.0)}
-    sp.plot_global_power(wo, ax=axes[1], alpha=wv.ar1(obs), bands=bands)
+    sp.plot_global_power(wo, x=obs, ax=axes[1], alpha=wv.ar1(obs), bands=bands)
     shares = [t.get_text() for t in axes[1].texts]
     assert len(shares) == 2 and all(s.endswith("%") for s in shares)
+    fig2, ax2 = plt.subplots()
+    sp.plot_global_power(wo, ax=ax2, bands=bands)  # without the series: band limits only, no shares
+    assert not ax2.texts
+    plt.close(fig2)
     assert axes[1].yaxis_inverted()  # long periods at the bottom, like the power map
     fig.savefig(tmp_path / "panels.png")
     assert (tmp_path / "panels.png").stat().st_size > 5_000

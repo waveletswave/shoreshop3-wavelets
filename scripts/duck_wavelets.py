@@ -61,7 +61,7 @@ BANDS = {  # periods in days; surveys every ~2-6 weeks do not resolve shorter pe
     "Interannual\n1.5-4 yr": (540, 1460),
     "Multi-year\n4-8 yr": (1460, 2920),
 }
-MIN_CYCLES = 3.0  # bands with fewer usable cycles are exploratory: shown, not ranked
+MIN_CYCLES = 3.0  # a band whose longest continuous usable stretch is shorter is exploratory: shown, not ranked
 FAMILY_ORDER = ["Equilibrium", "Equilibrium + DA", "Hybrid", "Process-based", "One-line",
                 "Deep learning", "Unclassified"]
 PERIOD_TICKS = {30 / YEAR: "1 mo", 91.3 / YEAR: "3 mo", 0.5: "6 mo", 1.0: "1 yr", 2.0: "2 yr",
@@ -73,7 +73,7 @@ BAND_LO = min(lo for lo, _ in BANDS.values())
 BAND_HI = max(hi for _, hi in BANDS.values())
 MAP_PERIODS = (0.9 * BAND_LO / YEAR, 1.5 * BAND_HI / YEAR)  # period range drawn in the maps (years)
 ATLAS_DPI = 220  # atlases are 16 x 16 in: 220 dpi is ~3600 px wide
-EXPLORATORY_NOTE = f"* fewer than {MIN_CYCLES:.0f} usable cycles: exploratory, not ranked"
+EXPLORATORY_NOTE = f"* longest continuous usable stretch shorter than {MIN_CYCLES:.0f} cycles: exploratory, not ranked"
 EXPLORATORY_MD = EXPLORATORY_NOTE.replace("*", "\\*", 1)  # the same note in Markdown
 
 
@@ -192,7 +192,8 @@ def trends(case: duck.DuckCase, order: list[str], meta: pd.DataFrame) -> pd.Data
     Periods longer than the multi-year band cannot be resolved by wavelets in a
     ~30-year record, so the trend is reported separately. Also the spread left
     after removing it (detrended std), which flags models that are almost a
-    straight line.
+    straight line, and the observed trend's share of the observed variance
+    (same times), to set beside the band shares.
     """
     t_yr = (pd.DatetimeIndex(case.time) - pd.Timestamp(case.time[0])) / pd.Timedelta(days=YEAR)
     t_yr = np.asarray(t_yr, float)
@@ -203,6 +204,7 @@ def trends(case: duck.DuckCase, order: list[str], meta: pd.DataFrame) -> pd.Data
         return float(b[0]), float(np.std(x[ok] - np.polyval(b, t_yr[ok])))
 
     obs_trend, obs_std = fit(case.obs)
+    obs_share = float(np.var(obs_trend * t_yr[ok]) / np.var(case.obs[ok]))
     fam = dict(zip(meta["model"], meta["family"]))
     team = dict(zip(meta["model"], meta["team"]))
     rows = []
@@ -210,12 +212,12 @@ def trends(case: duck.DuckCase, order: list[str], meta: pd.DataFrame) -> pd.Data
         tr, sd = fit(case.models[m])
         rows.append(dict(profile=case.profile, model=m, team=team.get(m, ""), family=fam.get(m, ""),
                          trend_m_per_yr=tr, obs_trend_m_per_yr=obs_trend, trend_error=tr - obs_trend,
-                         detrended_std=sd, obs_detrended_std=obs_std))
+                         detrended_std=sd, obs_detrended_std=obs_std, obs_trend_share=obs_share))
     return pd.DataFrame(rows)
 
 
 def add_support_dates(skill: pd.DataFrame, case: duck.DuckCase) -> pd.DataFrame:
-    """Dates and years behind each band's scores, and the exploratory flag."""
+    """Dates and years behind each band's scores, and the exploratory flag (longest stretch < MIN_CYCLES)."""
     t = pd.DatetimeIndex(case.time)
 
     def _date(i):
@@ -225,7 +227,10 @@ def add_support_dates(skill: pd.DataFrame, case: duck.DuckCase) -> pd.DataFrame:
     out["valid_start"] = [_date(i) for i in out["valid_first"]]
     out["valid_end"] = [_date(i) for i in out["valid_last"]]
     out["valid_years"] = out["valid_duration"] / YEAR
-    out["exploratory"] = ~(out["n_cycles"] >= MIN_CYCLES)
+    out["longest_start"] = [_date(i) for i in out["longest_first"]]
+    out["longest_end"] = [_date(i) for i in out["longest_last"]]
+    out["longest_years"] = out["longest_duration"] / YEAR
+    out["exploratory"] = ~(out["longest_cycles"] >= MIN_CYCLES)
     return out
 
 
@@ -259,7 +264,7 @@ def fig_observations(cases: dict, args, out: Path) -> Path:
                            title="Observed wavelet power (black contour: nominal 95 % level, AR(1) red noise; "
                                  "pale: cone of influence and survey gaps)")
         ax_map.set_xlim(mpl_dates(t[0]), mpl_dates(t[-1]))
-        sp.plot_global_power(wo, ax=ax_gws, alpha=wv.ar1(case.obs), period_scale=1 / YEAR,
+        sp.plot_global_power(wo, x=case.obs, ax=ax_gws, alpha=wv.ar1(case.obs), period_scale=1 / YEAR,
                              period_ticks=PERIOD_TICKS, bands=BANDS, period_lim=MAP_PERIODS)
         ax_gws.set_title("Time mean · % per band", fontsize=9.5)
         ax_gws.tick_params(labelleft=False)
@@ -569,8 +574,13 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
               "Each figure shows the support of its own metric.",
               "* **Significance** thresholds are nominal: AR(1) red-noise surrogates on the regular grid, not yet "
               "checked against the survey sampling (see Caveats).",
-              f"* Bands with fewer than {MIN_CYCLES:.0f} usable cycles are marked \\* and treated as exploratory: "
-              "shown, not ranked.",
+              "* **Variance share** (table, fig1): variance of the band signal / variance of the surveys, both over "
+              "the times at which the band is scored (the same times as its NSE). The shares need not add up to "
+              "100 %: each refers to its own band's times, and the rest of the variance lies at shorter periods, "
+              "at longer periods (the trend's share is given below) or in steps such as nourishments.",
+              "* **Cycles.** Usable times can come in several stretches between survey gaps. A band whose longest "
+              f"continuous usable stretch is shorter than {MIN_CYCLES:.0f} cycles is marked \\* and treated as "
+              "exploratory: shown, not ranked.",
               "* Monthly = month-to-month changes (1.5-4 months) that the surveys can see; not single storms.", ""]
 
     kinds = "(.png)" if args.no_pdf else "(.png, .pdf)"
@@ -578,7 +588,7 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
               ("PNG versions of each figure are in this folder." if args.no_pdf else
                "PNG and PDF versions of each figure are in this folder."), "",
               "1. `fig1_observed_wavelet_power`: the surveys, their wavelet power, and each band's share of the "
-              "resolved variance (only trustworthy cells count).",
+              "observed variance over the times the band is scored.",
               "2. `fig2_variance_ratio_by_period`: model / observed variance at each period "
               "(red = too much, blue = too little).",
               "3. `fig3_coherence_by_band`: share of each band's cells where model and surveys are coherent above "
@@ -611,15 +621,15 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
     for p, c in cases.items():
         df = skill[skill["profile"] == p]
         lines += [f"### {PROFILE_NAME.get(p, p)}", "",
-                  "| Band | share of obs. variance | usable: % of time / % of cells (dates, cycles) | best NSE | "
-                  "largest coherent share |", "|---|---|---|---|---|"]
+                  "| Band | share of obs. variance | usable: % of time / % of cells | cycles: all / longest stretch "
+                  "(its dates) | best NSE | largest coherent share |", "|---|---|---|---|---|---|"]
         for band in BANDS:
             b = df[df["band"] == band]
             r0 = b.iloc[0]
-            support = (f"{r0['valid_frac']:.0%} / {r0['valid_cell_frac']:.0%} ({month(r0['valid_start'])} to "
-                       f"{month(r0['valid_end'])}, {cycles(r0['n_cycles'])} cycles)"
-                       if np.isfinite(r0["n_cycles"]) else "–")
-            share = f"{r0['var_frac_obs']:.0%}" if np.isfinite(r0["var_frac_obs"]) else "–"
+            usable = f"{r0['valid_frac']:.0%} / {r0['valid_cell_frac']:.0%}"
+            span = (f"{cycles(r0['n_cycles'])} / {cycles(r0['longest_cycles'])} ({month(r0['longest_start'])} to "
+                    f"{month(r0['longest_end'])})" if np.isfinite(r0["longest_cycles"]) else "–")
+            share = f"{r0['var_share_obs']:.0%}" if np.isfinite(r0["var_share_obs"]) else "–"
             if r0["exploratory"]:
                 nse = coh = "exploratory: not ranked"
             else:
@@ -627,7 +637,7 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
                 top_coh = b.dropna(subset=["sig_frac"]).nlargest(3, "sig_frac")
                 nse = ", ".join(f"{r.model} ({fmt_nse(r.nse)})" for r in top_nse.itertuples()) or "–"
                 coh = ", ".join(f"{r.model} ({r.sig_frac:.0%})" for r in top_coh.itertuples()) or "–"
-            lines.append(f"| {one_line(band)} | {share} | {support} | {nse} | {coh} |")
+            lines.append(f"| {one_line(band)} | {share} | {usable} | {span} | {nse} | {coh} |")
         fams = [f for f in FAMILY_ORDER if f in set(fam["family"])] + sorted(set(fam["family"]) - set(FAMILY_ORDER))
         teams = sorted(set(team.loc[team["profile"] == p, "team"]), key=str.lower)
         expl = set(df.loc[df["exploratory"], "band"])
@@ -646,12 +656,15 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
         lines += ["In some families the medians mostly reflect one team: " + "; ".join(notes) + ".", ""]
 
     lines += ["## Long-term trend (longer than the wavelet bands)", "",
-              "Least-squares trend over the window, outside survey gaps (m/yr, + = seaward).", "",
-              "| Profile | observed | models: median (range) | closest to observed |", "|---|---|---|---|"]
+              "Least-squares trend over the window, outside survey gaps (m/yr, + = seaward), and its share of "
+              "the observed variance over the same times.", "",
+              "| Profile | observed (share of obs. variance) | models: median (range) | closest to observed |",
+              "|---|---|---|---|"]
     for p, c in cases.items():
         tr = c["trend"]
         close = tr.assign(err=tr["trend_error"].abs()).nsmallest(3, "err")
-        lines.append(f"| {p} | {tr['obs_trend_m_per_yr'].iloc[0]:+.2f} | {tr['trend_m_per_yr'].median():+.2f} "
+        lines.append(f"| {p} | {tr['obs_trend_m_per_yr'].iloc[0]:+.2f} ({tr['obs_trend_share'].iloc[0]:.0%}) | "
+                     f"{tr['trend_m_per_yr'].median():+.2f} "
                      f"({tr['trend_m_per_yr'].min():+.2f} to {tr['trend_m_per_yr'].max():+.2f}) | "
                      + ", ".join(f"{r.model} ({r.trend_m_per_yr:+.2f})" for r in close.itertuples()) + " |")
     lines.append("")
@@ -684,12 +697,13 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
             if b not in first.index:
                 continue
             r0 = first.loc[b]
-            if r0["exploratory"] and np.isfinite(r0["n_cycles"]):
-                lines.append(f"  * {one_line(b)}: {r0['n_cycles']:.1f} cycles usable ({month(r0['valid_start'])} "
-                             f"to {month(r0['valid_end'])}); shown for completeness, not ranked. Coherence there "
-                             "is just as uncertain as NSE.")
-            elif np.isfinite(r0["var_frac_obs"]) and r0["var_frac_obs"] < 0.05 and worst.get(b, 0) < -3:
-                lines.append(f"  * {one_line(b)}: little observed variance ({r0['var_frac_obs']:.0%}), so small "
+            if r0["exploratory"] and np.isfinite(r0["longest_cycles"]):
+                lines.append(f"  * {one_line(b)}: the longest continuous usable stretch holds "
+                             f"{r0['longest_cycles']:.1f} cycles ({month(r0['longest_start'])} to "
+                             f"{month(r0['longest_end'])}; {r0['n_cycles']:.1f} in all); shown for completeness, "
+                             "not ranked. Coherence there is just as uncertain as NSE.")
+            elif np.isfinite(r0["var_share_obs"]) and r0["var_share_obs"] < 0.05 and worst.get(b, 0) < -3:
+                lines.append(f"  * {one_line(b)}: little observed variance ({r0['var_share_obs']:.0%}), so small "
                              "errors give large negative NSE.")
         same, close = c["dups"]
         for a, b in same:
@@ -722,7 +736,9 @@ def write_summary(skill: pd.DataFrame, fam: pd.DataFrame, team: pd.DataFrame, ca
               "* Families are provisional labels for grouping only.", ""]
     lines += ["## Files", ""] + [f"* `{f.relative_to(out).with_suffix('')}` {kinds}" for f in figures] + \
              ["* `skill_by_band.csv`: every metric for every model, band and profile (sig_frac = coherent "
-              "share, mean_rsq = mean coherence, lag in days, valid_* = support of each score)",
+              "share, mean_rsq = mean coherence, lag in days, var_share_* = share of the observed variance over "
+              "the band's scoring times, valid_* = support of each score, longest_* = longest continuous usable "
+              "stretch)",
               "* `family_summary.csv`: medians per family, each team counted once",
               "* `team_summary.csv`: medians per team",
               "* `trend_by_model.csv`: linear trend and detrended spread of every model",
@@ -948,6 +964,9 @@ def main() -> None:
                 window=window,
                 profiles={p: profile_record(c) for p, c in cases.items()},
                 bands_days={one_line(k): v for k, v in BANDS.items()}, min_cycles=MIN_CYCLES,
+                exploratory_rule="longest continuous usable stretch shorter than min_cycles band-centre periods",
+                variance_share="variance of the band signal / variance of the surveys, both over the times at "
+                               "which the band is scored",
                 significance=dict(method="AR(1) red-noise surrogate pairs on the regular grid (nominal)",
                                   n_surrogates=args.n_surrogates, seed=0, alpha_decimals=2, level=0.95),
                 code=code_version(), software=software_versions(),

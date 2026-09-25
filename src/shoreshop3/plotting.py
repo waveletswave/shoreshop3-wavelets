@@ -374,7 +374,7 @@ def plot_global_spectra(results: Mapping[str, CWTResult], *, obs_key: str = "obs
     return ax
 
 
-def plot_global_power(res: CWTResult, *, ax=None, alpha: float | None = None, level: float = 0.95,
+def plot_global_power(res: CWTResult, *, x=None, ax=None, alpha: float | None = None, level: float = 0.95,
                       period_scale: float = 1.0, period_ticks=None, period_label: str = "",
                       units: str = "m²", bands: Mapping[str, tuple[float, float]] | None = None,
                       title: str | None = None, period_lim: tuple[float, float] | None = None):
@@ -382,13 +382,14 @@ def plot_global_power(res: CWTResult, *, ax=None, alpha: float | None = None, le
 
     Time-averaged power outside the COI and gaps in physical units (ink), the
     AR1 ``level`` significance line (dashed; nominal: it assumes regular
-    sampling) and, per band (limits in the
-    units of ``res.periods``), the band's share of the resolved variance
-    (:func:`shoreshop3.wavelets.band_variance_fraction`, same trustworthy cells).
+    sampling) and the limits of ``bands`` (in the units of ``res.periods``).
+    With ``x``, the series that was transformed, each band is labelled with
+    its share of the variance over the times it can be evaluated
+    (:func:`shoreshop3.wavelets.band_variance_share`).
     """
     from matplotlib.transforms import blended_transform_factory
 
-    from .wavelets import band_variance_fraction, global_significance
+    from .wavelets import band_variance_share, global_significance
 
     ax = ax or plt.gca()
     gws, count = global_spectrum(res)
@@ -416,10 +417,10 @@ def plot_global_power(res: CWTResult, *, ax=None, alpha: float | None = None, le
         for v in edges:
             if per.min() <= v * period_scale <= per.max():
                 ax.axhline(v * period_scale, color=AXIS, linewidth=0.8, zorder=1)
-        for lo, hi in bands.values():
+        for lo, hi in bands.values() if x is not None else ():
             mid = np.sqrt(lo * hi) * period_scale
             if per.min() <= mid <= per.max():
-                share = band_variance_fraction(res, (lo, hi))
+                share = band_variance_share(res, x, (lo, hi))
                 ax.text(0.97, mid, f"{share:.0%}" if np.isfinite(share) else "–", transform=trans,
                         ha="right", va="center", fontsize=9, color=INK_2)
     ax.legend(loc="lower left", fontsize=8, handlelength=1.8)
@@ -438,7 +439,7 @@ _METRICS = {
                       ticks=([-2, -1, 0, 1, 2], ["×0.25", "×0.5", "×1", "×2", "×4"])),
     "mean_rsq": dict(cmap=SEQUENTIAL, norm=Normalize(0.0, 1.0), label="Coherence R²"),
     "sig_frac": dict(cmap=SEQUENTIAL, norm=Normalize(0.0, 1.0), label="Coherent share"),
-    "var_frac_obs": dict(cmap=SEQUENTIAL, norm=Normalize(0.0, 1.0), label="Share of obs. variance"),
+    "var_share_obs": dict(cmap=SEQUENTIAL, norm=Normalize(0.0, 1.0), label="Share of obs. variance"),
     "valid_frac": dict(cmap=SEQUENTIAL, norm=Normalize(0.0, 1.0), label="Share evaluable"),
     "phase_deg": dict(cmap=DIVERGING, norm=TwoSlopeNorm(vmin=-90.0, vcenter=0.0, vmax=90.0),
                       label="Phase (deg, + = model late)"),
